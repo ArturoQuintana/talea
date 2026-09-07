@@ -42,11 +42,32 @@ def _presentation_config() -> dict[str, dict]:
         out[slug] = {"data": m.prices_path.parent, "title": p.title,
                      "tzlabel": p.tz_label, "gate": p.show_gate,
                      "source": p.source, "tab": p.tab_name,
-                     "currency": m.currency}
+                     "currency": m.currency,
+                     "publication": p.publication, "note": p.note}
     return out
 
 
 MARKETS = _presentation_config()
+
+# Generic fallback for a market whose registry entry carries no publication
+# label — deliberately vague rather than borrowing another market's clock
+# (the footer used to hardcode Spain's "~13:15 CET" for every market; audit
+# finding 2026-09-07).
+GENERIC_PUBLICATION = "the target day's prices are published"
+
+
+def _publication(cfg: dict) -> str:
+    return cfg.get("publication") or GENERIC_PUBLICATION
+
+
+def _disclosure(cfg: dict) -> str:
+    """A market-specific disclosure banner (registry `presentation.note`),
+    rendered verbatim on every template of that market's page; empty for
+    markets with nothing to disclose."""
+    note = cfg.get("note")
+    if not note:
+        return ""
+    return (f'<div class="banner disclosure"><b>Disclosure.</b> {note}</div>')
 
 
 def jsonl(p: Path) -> list[dict]:
@@ -99,6 +120,15 @@ BASE_TOKENS = """<style>
   .banner { background:var(--card); border:1px solid var(--border); border-radius:10px;
     padding:14px 16px; font-size:13.5px; color:var(--ink2); margin:22px 0 6px; }
   .banner b { color:var(--ink); }
+  .banner.disclosure { border-color:var(--accent); }
+  .tbl-wrap { overflow-x:auto; border:1px solid var(--border); border-radius:6px; background:var(--card); }
+  table { border-collapse:collapse; width:100%; min-width:480px; font-size:13px; }
+  th, td { text-align:right; padding:9px 14px; border-top:1px solid var(--grid); white-space:nowrap; }
+  th { border-top:0; font:600 10.5px/1 var(--mono); letter-spacing:.1em; text-transform:uppercase; color:var(--muted); }
+  th:first-child, td:first-child { text-align:left; }
+  td { font-family:var(--mono); font-size:12.5px; font-variant-numeric:tabular-nums; color:var(--ink2); }
+  td.k { color:var(--ink); }
+  .note { color:var(--ink2); font-size:13px; margin:10px 2px 0; }
   .grid { display:grid; gap:14px; grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); }
   .mkt { display:block; background:var(--card); border:1px solid var(--border);
     border-radius:12px; padding:18px 18px 16px; color:inherit; transition:border-color .12s; }
@@ -139,19 +169,8 @@ def _open_cards(receipts: list[dict], settled_keys: set) -> list[str]:
     return open_html
 
 
-def _awaiting(slug: str, cfg: dict, receipts: list[dict], now: datetime,
-              cur: str) -> str:
-    """Public page for a live market with no settled day yet: the receipts are
-    already committed-before-truth; only the settlement/P&L is pending. This is
-    the honest live state (GB just launched; ERCOT has committed receipts but no
-    published prices to settle against yet)."""
-    open_html = _open_cards(receipts, set())
-    if not open_html:
-        open_html = ['<div class="open-card"><span class="pending">None yet'
-                     '</span><span class="oc">First receipt commits at the next '
-                     'pre-auction tick; watch this page.</span></div>']
+def _page_head(slug: str, cfg: dict, now: datetime) -> str:
     asof = now.strftime(f"%Y-%m-%d %H:%M {cfg['tzlabel']}")
-    src = cfg.get("source", "")
     return f"""{BASE_TOKENS}<title>{cfg['tab']} day-ahead ledger</title>
 <div class="wrap">
   <header>
@@ -161,20 +180,145 @@ def _awaiting(slug: str, cfg: dict, receipts: list[dict], now: datetime,
       before price publication (leak-guarded, OpenTimestamps-stamped —
       Bitcoin&#8209;confirmed within days) · as of <code>{asof}</code></p>
   </header>
-  <div class="banner"><b>Live · awaiting first settled day.</b> The receipts
-    below are already committed and pushed <i>before</i> the auction publishes —
-    that is the whole point. Settlement (P&amp;L vs the realised prices) appears
-    here the day after the first target day publishes; nothing is backfilled.</div>
-  <h2>Committed receipts · awaiting settlement</h2>
-  {chr(10).join(open_html)}
-  <footer>
-    <p>Paper money — no capital at stake. Prices: {src}. The ledger is
+  {_disclosure(cfg)}"""
+
+
+def _light_footer(cfg: dict) -> str:
+    src = cfg.get("source", "")
+    return f"""  <footer>
+    <p>Paper money — no capital at stake. Prices: {src}. Every receipt is
+      committed and pushed before {_publication(cfg)}. The ledger is
       append-only; each day's hash is OpenTimestamps-stamped at commit and
       Bitcoin-confirmed within days (a just-committed proof is <i>pending</i>
       until a block lands — see VERIFY.md for per-date status). Verify
       everything yourself — see VERIFY.md in this repository.</p>
   </footer>
 </div>"""
+
+
+def _awaiting(slug: str, cfg: dict, receipts: list[dict], now: datetime,
+              cur: str) -> str:
+    """Public page for a live market with NO settled day yet (for ANY strategy):
+    the receipts are already committed-before-truth; only the settlement/P&L is
+    pending. This is the honest live state of a just-launched market."""
+    open_html = _open_cards(receipts, set())
+    if not open_html:
+        open_html = ['<div class="open-card"><span class="pending">None yet'
+                     '</span><span class="oc">First receipt commits at the next '
+                     'pre-auction tick; watch this page.</span></div>']
+    return f"""{_page_head(slug, cfg, now)}
+  <div class="banner"><b>Live · awaiting first settled day.</b> The receipts
+    below are already committed and pushed <i>before</i> {_publication(cfg)} —
+    that is the whole point. Settlement (P&amp;L vs the realised prices) appears
+    here the day after the first target day publishes; nothing is backfilled.</div>
+  <h2>Committed receipts · awaiting settlement</h2>
+  {chr(10).join(open_html)}
+{_light_footer(cfg)}"""
+
+
+def _missed_days(receipts: list[dict], strategy: str) -> list[str]:
+    """Dates in [first receipt target, last receipt target] with no receipt for
+    `strategy`. Bounded by the last RECEIPT (not the last SETTLED day) so a
+    commit gap surfaces immediately instead of waiting a full settlement cycle
+    (independent-audit finding, 2026-08-31). Empty if the strategy has never
+    committed at all (that case is disclosed separately, not counted as gaps)."""
+    targets = {r["target"] for r in receipts if r["strategy"] == strategy}
+    if not targets:
+        return []
+    d0, d1 = date.fromisoformat(min(targets)), date.fromisoformat(max(targets))
+    missed, d = [], d0
+    while d <= d1:
+        if d.isoformat() not in targets:
+            missed.append(d.isoformat())
+        d += timedelta(days=1)
+    return missed
+
+
+def _h2h(ledger: list[dict], missed: list[str], cur: str):
+    """The strategy-panel table: one row per settled day, one cell per strategy
+    that has ever settled; plus the pairwise-vs-primary totals on shared days.
+    Shared by the full page and the shadow-only page so shadow settlements are
+    rendered identically whether or not the primary has settled."""
+    strategies = [s for s in NAMES if any(e["strategy"] == s for e in ledger)]
+    by_day: dict[str, dict[str, dict]] = {}
+    for e in ledger:
+        by_day.setdefault(e["target"], {})[e["strategy"]] = e
+    rows = []
+    for t in sorted(set(list(by_day) + missed)):
+        cells = []
+        for s in strategies:
+            e = by_day.get(t, {}).get(s)
+            if e is None:
+                cells.append("<td>missed</td>" if s == PRIMARY and t in missed
+                             else "<td>—</td>")
+            else:
+                cap = (f"{e['capture'] * 100:.1f}%"
+                       if e.get("capture") is not None else "n/a")
+                tau = (f" · tau {e['tau']:.3f}"
+                       if e.get("tau") is not None else "")
+                cells.append(f"<td>+{fmt(e['pnl_eur'])}&thinsp;{cur} ({cap}{tau})"
+                             "</td>")
+        rows.append(f'<tr><td class="k">{t}</td>{"".join(cells)}</tr>')
+    pair_notes = []
+    for s in strategies:
+        if s == PRIMARY:
+            continue
+        shared = [(by_day[t][s]["pnl_eur"], by_day[t][PRIMARY]["pnl_eur"])
+                  for t in by_day if s in by_day[t] and PRIMARY in by_day[t]]
+        if shared:
+            delta = sum(a - b for a, b in shared)
+            pair_notes.append(f"{NAMES[s]} vs {NAMES[PRIMARY]}: "
+                              f"{delta:+.2f}&thinsp;{cur} over {len(shared)} "
+                              "shared days")
+    head = "".join(f"<th>{NAMES[s]}{' · primary' if s == PRIMARY else ' · shadow'}</th>"
+                   for s in strategies)
+    return head, rows, pair_notes, strategies
+
+
+def _shadow_only(slug: str, cfg: dict, receipts: list[dict], ledger: list[dict],
+                 now: datetime, cur: str) -> str:
+    """Public page for a market where SHADOW strategies have settled days but the
+    PRIMARY has none. Renders the settled shadow days (the strategy panel table)
+    and marks only genuinely-unsettled receipts as pending — never the
+    'awaiting first settled day' banner, which would contradict the ledger
+    (independent-audit finding F1, 2026-09-07: GB showed 'awaiting' + 16
+    'Pending' receipts while 12 shadow settlements sat in ledger.jsonl)."""
+    settled_keys = {(e["target"], e["strategy"]) for e in ledger}
+    n_days = len({e["target"] for e in ledger})
+    prim_receipts = [r for r in receipts if r["strategy"] == PRIMARY]
+    n_targets = len({r["target"] for r in receipts})
+    if prim_receipts:
+        prim_line = (f"The primary ({NAMES[PRIMARY]}) has committed receipts "
+                     "but no settled day yet.")
+    else:
+        prim_line = (f"The primary ({NAMES[PRIMARY]}) has committed <b>no "
+                     f"receipt</b> in this market so far (0 of {n_targets} "
+                     "target days) — only shadow strategies have; see the "
+                     "disclosure above and VERIFY.md.")
+    head, rows, pair_notes, strategies = _h2h(ledger, [], cur)
+    open_html = _open_cards(receipts, settled_keys)
+    if not open_html:
+        open_html = ['<div class="open-card"><span class="pending">None open'
+                     '</span><span class="oc">Next commit at the next '
+                     'pre-deadline tick.</span></div>']
+    return f"""{_page_head(slug, cfg, now)}
+  <div class="banner"><b>Live · {n_days} settled day{'s' if n_days != 1 else ''} on shadow strategies
+    · no primary settlement yet.</b> {prim_line}
+    Every receipt below was committed and pushed <i>before</i>
+    {_publication(cfg)}; settlements are appended the day after each target
+    day completes; nothing is backfilled.</div>
+  <h2>Strategy panel · settled days</h2>
+  <div class="tbl-wrap"><table>
+    <thead><tr><th>Target day</th>{head}</tr></thead>
+    <tbody>{chr(10).join(rows)}</tbody>
+  </table></div>
+  <p class="note">{" · ".join(pair_notes) or "no shared primary/shadow days yet"}.
+    Claims of superiority require the pre-registered bar (&ge;30 non-tied shared
+    days, sign-test p&lt;0.05) — see VERIFY.md. All {len(strategies)} settled
+    strategies use identical costs; none can be revised after the fact.</p>
+  <h2>Open receipts · awaiting settlement</h2>
+  {chr(10).join(open_html)}
+{_light_footer(cfg)}"""
 
 
 def build(slug: str = "es") -> str:
@@ -187,8 +331,12 @@ def build(slug: str = "es") -> str:
     now = datetime.now(ZoneInfo("Europe/Madrid"))
 
     prim = [e for e in ledger if e["strategy"] == PRIMARY]
-    if not prim:
+    if not ledger:
         return _awaiting(slug, cfg, receipts, now, cur)
+    if not prim:
+        # Shadows have settled, the primary hasn't: the ledger is NOT empty, so
+        # the awaiting page would contradict it (audit finding F1, 2026-09-07).
+        return _shadow_only(slug, cfg, receipts, ledger, now, cur)
     curves = day_curves(DATA)
     prim_by_day = {e["target"]: e for e in prim}
     total = sum(e["pnl_eur"] for e in prim)
@@ -197,19 +345,7 @@ def build(slug: str = "es") -> str:
     cap_mean = statistics.fmean(caps) * 100 if caps else 0
     wins = sum(1 for e in prim if e["pnl_eur"] > 0)
 
-    # missed primary days: dates in [first receipt target, last receipt target]
-    # with no primary receipt at all. Bounded by the last RECEIPT (not the last
-    # SETTLED day) so a commit gap surfaces immediately instead of waiting a
-    # full settlement cycle (independent-audit finding, 2026-08-31).
-    prim_receipts = {r["target"] for r in receipts if r["strategy"] == PRIMARY}
-    d0 = date.fromisoformat(min(prim_receipts))
-    d1 = date.fromisoformat(max(prim_receipts))
-    missed = []
-    d = d0
-    while d <= d1:
-        if d.isoformat() not in prim_receipts:
-            missed.append(d.isoformat())
-        d += timedelta(days=1)
+    missed = _missed_days(receipts, PRIMARY)
 
     settled_keys = {(e["target"], e["strategy"]) for e in ledger}
 
@@ -236,40 +372,7 @@ def build(slug: str = "es") -> str:
         })
 
     # head-to-head: one row per settled day, one cell per strategy
-    strategies = [s for s in NAMES if any(e["strategy"] == s for e in ledger)]
-    by_day: dict[str, dict[str, dict]] = {}
-    for e in ledger:
-        by_day.setdefault(e["target"], {})[e["strategy"]] = e
-    h2h_rows = []
-    for t in sorted(set(list(by_day) + missed)):
-        cells = []
-        for s in strategies:
-            e = by_day.get(t, {}).get(s)
-            if e is None:
-                cells.append("<td>missed</td>" if s == PRIMARY and t in missed
-                             else "<td>—</td>")
-            else:
-                cap = (f"{e['capture'] * 100:.1f}%"
-                       if e.get("capture") is not None else "n/a")
-                tau = (f" · tau {e['tau']:.3f}"
-                       if e.get("tau") is not None else "")
-                cells.append(f"<td>+{fmt(e['pnl_eur'])}&thinsp;{cur} ({cap}{tau})"
-                             "</td>")
-        h2h_rows.append(f'<tr><td class="k">{t}</td>{"".join(cells)}</tr>')
-    # pairwise totals vs primary on shared days
-    pair_notes = []
-    for s in strategies:
-        if s == PRIMARY:
-            continue
-        shared = [(by_day[t][s]["pnl_eur"], by_day[t][PRIMARY]["pnl_eur"])
-                  for t in by_day if s in by_day[t] and PRIMARY in by_day[t]]
-        if shared:
-            delta = sum(a - b for a, b in shared)
-            pair_notes.append(f"{NAMES[s]} vs {NAMES[PRIMARY]}: "
-                              f"{delta:+.2f}&thinsp;{cur} over {len(shared)} "
-                              "shared days")
-    h2h_head = "".join(f"<th>{NAMES[s]}{' · primary' if s == PRIMARY else ' · shadow'}</th>"
-                       for s in strategies)
+    h2h_head, h2h_rows, pair_notes, strategies = _h2h(ledger, missed, cur)
 
     ledger_rows = []
     for e in prim:
@@ -323,6 +426,8 @@ def build(slug: str = "es") -> str:
         "title": cfg["title"],
         "cur": cur, "curcode": curcode,
         "source": cfg.get("source", "apidatos.ree.es"),
+        "publication": _publication(cfg),
+        "disclosure": _disclosure(cfg),
         "asof": now.strftime(f"%Y-%m-%d %H:%M {cfg['tzlabel']}"),
         "total": fmt(total), "oracle_total": fmt(oracle_total),
         "cap_mean": f"{cap_mean:.1f}", "wins": wins, "n": len(prim),
@@ -398,6 +503,9 @@ TEMPLATE = """<title>%(tabtitle)s</title>
   .pending { font:600 10.5px/1 var(--mono); letter-spacing:.1em; text-transform:uppercase;
     color:var(--ink2); border:1px solid var(--axis); border-radius:99px; padding:5px 9px; }
   .note { color:var(--ink2); font-size:13px; margin:10px 2px 0; }
+  .banner { background:var(--card); border:1px solid var(--border); border-radius:6px;
+    padding:14px 16px; font-size:13.5px; color:var(--ink2); margin:22px 0 6px; }
+  .banner b { color:var(--ink); }
   .gate { background:var(--card); border:1px solid var(--border); border-radius:6px; padding:16px 18px; }
   .gate-cells { display:grid; grid-template-columns:repeat(21,1fr); gap:4px; margin:10px 0 8px; }
   .gate-cells i { display:block; height:14px; border-radius:3px; background:var(--bg); border:1px solid var(--grid); }
@@ -425,6 +533,7 @@ TEMPLATE = """<title>%(tabtitle)s</title>
       (leak-guarded, OpenTimestamps-stamped &mdash; Bitcoin&#8209;confirmed within days) ·
       data as of <code>%(asof)s</code> · generated from the audit files, no hand-edited numbers</p>
   </header>
+  %(disclosure)s
 
   <div class="tiles">
     <div class="tile"><div class="k">Net P&amp;L · paper</div>
@@ -473,7 +582,7 @@ TEMPLATE = """<title>%(tabtitle)s</title>
       same battery, same costs. Capture = P&amp;L ÷ oracle P&amp;L; tau =
       Kendall tau-b of the committed forecast vs the actual day.</p>
     <p>Paper money — no capital at stake. Every receipt is committed and
-      pushed before the D+1 auction publishes (~13:15 CET); the ledger is
+      pushed before %(publication)s; the ledger is
       append-only and OpenTimestamps-stamped — each day's proof is submitted at
       commit and Bitcoin-confirmed within days (a fresh proof is <i>pending</i>
       until a block lands; see VERIFY.md for per-date confirmed/pending status);

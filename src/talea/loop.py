@@ -98,6 +98,17 @@ class Presentation:
     tz_label: str = ""
     source: str = ""
     show_gate: bool = False
+    # What the receipts are committed BEFORE, in this market's own terms (the
+    # page footer's "committed and pushed before <publication>"). Empty = the
+    # renderer's generic fallback. Added 2026-09-07 after the auditor found the
+    # DE/ERCOT footers quoting Spain's "~13:15 CET" — the renderer's template
+    # had ONE hardcoded publication time for every market.
+    publication: str = ""
+    # A market-specific disclosure rendered verbatim on its public page (e.g.
+    # GB: the settlement index is a traded within-day index, not a day-ahead
+    # auction, so the persistence primary structurally never commits there).
+    # Empty = nothing to disclose.
+    note: str = ""
 
 
 @dataclass(frozen=True)

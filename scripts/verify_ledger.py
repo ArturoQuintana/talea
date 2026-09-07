@@ -191,11 +191,11 @@ def verify_market(slug: str, verify_ots: bool) -> Report:
     # 4) OpenTimestamps coverage (append-only proof + anchor count)
     ots_dir = d / "ots"
     manifests = sorted(ots_dir.glob("*.txt")) if ots_dir.exists() else []
-    anchored = [m for m in manifests if m.with_suffix(".txt.ots").exists()]
+    stamped = [m for m in manifests if m.with_suffix(".txt.ots").exists()]
     rec_prefixes = prefix_hashes(d / "receipts.jsonl")
     led_prefixes = prefix_hashes(d / "ledger.jsonl")
     covered_recs = covered_leds = 0
-    for m in anchored:
+    for m in stamped:
         rec_h = led_h = None
         for line in m.read_text().splitlines():
             if line.startswith("sha256(receipts.jsonl)="):
@@ -212,15 +212,22 @@ def verify_market(slug: str, verify_ots: bool) -> Report:
         elif led_h in led_prefixes:
             covered_leds = max(covered_leds, led_prefixes[led_h])
     n_rec, n_led = len(receipts), len(ledger)
-    if anchored:
-        r.note(f"OTS: {len(anchored)}/{len(manifests)} manifests anchored; "
-               f"receipts Bitcoin-covered {covered_recs}/{n_rec}, "
+    # Wording (audit finding 2026-09-07): without --verify-ots this pass only
+    # checks that a .ots proof EXISTS next to each manifest and that the manifest
+    # hashes a prefix of the current file — it does NOT distinguish a PENDING
+    # (calendar-only) proof from a Bitcoin-confirmed one. So the default report
+    # says "OTS-stamped"/"OTS-covered", never "anchored"/"Bitcoin-covered";
+    # Bitcoin finality is only asserted by the --verify-ots branch below.
+    if stamped:
+        r.note(f"OTS: {len(stamped)}/{len(manifests)} manifests OTS-stamped; "
+               f"receipts OTS-covered {covered_recs}/{n_rec}, "
                f"ledger {covered_leds}/{n_led} "
-               f"(uncovered tail = appended since last weekly anchor)")
+               f"(uncovered tail = appended since the last stamped manifest; "
+               f"Bitcoin confirmation NOT checked here — pass --verify-ots)")
     else:
-        r.warn(f"OTS: no anchored manifests found in {ots_dir}")
-    if verify_ots and anchored:
-        for m in anchored:
+        r.warn(f"OTS: no OTS-stamped manifests found in {ots_dir}")
+    if verify_ots and stamped:
+        for m in stamped:
             proof = m.with_suffix(".txt.ots")
             try:
                 out = subprocess.run(
@@ -243,7 +250,7 @@ def main() -> int:
     ap.add_argument("--market", default="es")
     ap.add_argument("--all", action="store_true", help="every market under Data/")
     ap.add_argument("--verify-ots", action="store_true",
-                    help="also shell `ots verify` on each anchored proof (slow, network)")
+                    help="also shell `ots verify` on each stamped proof — the ONLY mode that asserts Bitcoin confirmation (slow, network)")
     args = ap.parse_args()
 
     if args.all:

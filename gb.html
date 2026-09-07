@@ -39,6 +39,15 @@
   .banner { background:var(--card); border:1px solid var(--border); border-radius:10px;
     padding:14px 16px; font-size:13.5px; color:var(--ink2); margin:22px 0 6px; }
   .banner b { color:var(--ink); }
+  .banner.disclosure { border-color:var(--accent); }
+  .tbl-wrap { overflow-x:auto; border:1px solid var(--border); border-radius:6px; background:var(--card); }
+  table { border-collapse:collapse; width:100%; min-width:480px; font-size:13px; }
+  th, td { text-align:right; padding:9px 14px; border-top:1px solid var(--grid); white-space:nowrap; }
+  th { border-top:0; font:600 10.5px/1 var(--mono); letter-spacing:.1em; text-transform:uppercase; color:var(--muted); }
+  th:first-child, td:first-child { text-align:left; }
+  td { font-family:var(--mono); font-size:12.5px; font-variant-numeric:tabular-nums; color:var(--ink2); }
+  td.k { color:var(--ink); }
+  .note { color:var(--ink2); font-size:13px; margin:10px 2px 0; }
   .grid { display:grid; gap:14px; grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); }
   .mkt { display:block; background:var(--card); border:1px solid var(--border);
     border-radius:12px; padding:18px 18px 16px; color:inherit; transition:border-color .12s; }
@@ -65,33 +74,37 @@
     <h1>GB day-ahead battery arbitrage</h1>
     <p class="asof">1&nbsp;MW / 2&nbsp;MWh virtual battery · decisions committed
       before price publication (leak-guarded, OpenTimestamps-stamped —
-      Bitcoin&#8209;confirmed within days) · as of <code>2026-09-07 11:00 London</code></p>
+      Bitcoin&#8209;confirmed within days) · as of <code>2026-09-07 12:30 London</code></p>
   </header>
-  <div class="banner"><b>Live · awaiting first settled day.</b> The receipts
-    below are already committed and pushed <i>before</i> the auction publishes —
-    that is the whole point. Settlement (P&amp;L vs the realised prices) appears
-    here the day after the first target day publishes; nothing is backfilled.</div>
-  <h2>Committed receipts · awaiting settlement</h2>
-  <div class="open-card" style="margin-bottom:10px"><span class="pending">Pending</span><span class="oc"><b>2026-08-31</b> · Climatology v1 · shadow</span><span class="oc">buy <b class="m">13·14h</b> · sell <b class="m">19·20h</b></span><span class="oc">committed <span class="m">2026-08-30T09:00Z</span>, before publication</span></div>
-<div class="open-card" style="margin-bottom:10px"><span class="pending">Pending</span><span class="oc"><b>2026-08-31</b> · Weekly v1 · shadow</span><span class="oc">buy <b class="m">14·15h</b> · sell <b class="m">19·20h</b></span><span class="oc">committed <span class="m">2026-08-30T09:00Z</span>, before publication</span></div>
-<div class="open-card" style="margin-bottom:10px"><span class="pending">Pending</span><span class="oc"><b>2026-09-01</b> · Climatology v1 · shadow</span><span class="oc">buy <b class="m">13·14h</b> · sell <b class="m">19·20h</b></span><span class="oc">committed <span class="m">2026-08-31T09:00Z</span>, before publication</span></div>
-<div class="open-card" style="margin-bottom:10px"><span class="pending">Pending</span><span class="oc"><b>2026-09-01</b> · Weekly v1 · shadow</span><span class="oc">buy <b class="m">13·14h</b> · sell <b class="m">19·20h</b></span><span class="oc">committed <span class="m">2026-08-31T09:00Z</span>, before publication</span></div>
-<div class="open-card" style="margin-bottom:10px"><span class="pending">Pending</span><span class="oc"><b>2026-09-02</b> · Climatology v1 · shadow</span><span class="oc">buy <b class="m">13·14h</b> · sell <b class="m">19·20h</b></span><span class="oc">committed <span class="m">2026-09-01T09:00Z</span>, before publication</span></div>
-<div class="open-card" style="margin-bottom:10px"><span class="pending">Pending</span><span class="oc"><b>2026-09-02</b> · Weekly v1 · shadow</span><span class="oc">buy <b class="m">14·23h</b> · sell <b class="m">18·19h</b></span><span class="oc">committed <span class="m">2026-09-01T09:00Z</span>, before publication</span></div>
-<div class="open-card" style="margin-bottom:10px"><span class="pending">Pending</span><span class="oc"><b>2026-09-03</b> · Climatology v1 · shadow</span><span class="oc">buy <b class="m">11·13h</b> · sell <b class="m">19·20h</b></span><span class="oc">committed <span class="m">2026-09-02T09:00Z</span>, before publication</span></div>
-<div class="open-card" style="margin-bottom:10px"><span class="pending">Pending</span><span class="oc"><b>2026-09-03</b> · Weekly v1 · shadow</span><span class="oc">buy <b class="m">01·02h</b> · sell <b class="m">17·18h</b></span><span class="oc">committed <span class="m">2026-09-02T09:00Z</span>, before publication</span></div>
-<div class="open-card" style="margin-bottom:10px"><span class="pending">Pending</span><span class="oc"><b>2026-09-04</b> · Climatology v1 · shadow</span><span class="oc">buy <b class="m">13·14h</b> · sell <b class="m">19·20h</b></span><span class="oc">committed <span class="m">2026-09-03T09:00Z</span>, before publication</span></div>
-<div class="open-card" style="margin-bottom:10px"><span class="pending">Pending</span><span class="oc"><b>2026-09-04</b> · Weekly v1 · shadow</span><span class="oc">buy <b class="m">15·23h</b> · sell <b class="m">05·06h</b></span><span class="oc">committed <span class="m">2026-09-03T09:00Z</span>, before publication</span></div>
-<div class="open-card" style="margin-bottom:10px"><span class="pending">Pending</span><span class="oc"><b>2026-09-05</b> · Climatology v1 · shadow</span><span class="oc">buy <b class="m">13·14h</b> · sell <b class="m">18·19h</b></span><span class="oc">committed <span class="m">2026-09-04T09:00Z</span>, before publication</span></div>
-<div class="open-card" style="margin-bottom:10px"><span class="pending">Pending</span><span class="oc"><b>2026-09-05</b> · Weekly v1 · shadow</span><span class="oc">buy <b class="m">04·06h</b> · sell <b class="m">17·19h</b></span><span class="oc">committed <span class="m">2026-09-04T09:00Z</span>, before publication</span></div>
-<div class="open-card" style="margin-bottom:10px"><span class="pending">Pending</span><span class="oc"><b>2026-09-06</b> · Climatology v1 · shadow</span><span class="oc">buy <b class="m">13·14h</b> · sell <b class="m">18·19h</b></span><span class="oc">committed <span class="m">2026-09-05T09:00Z</span>, before publication</span></div>
-<div class="open-card" style="margin-bottom:10px"><span class="pending">Pending</span><span class="oc"><b>2026-09-06</b> · Weekly v1 · shadow</span><span class="oc">buy <b class="m">05·06h</b> · sell <b class="m">19·20h</b></span><span class="oc">committed <span class="m">2026-09-05T09:00Z</span>, before publication</span></div>
-<div class="open-card" style="margin-bottom:10px"><span class="pending">Pending</span><span class="oc"><b>2026-09-07</b> · Climatology v1 · shadow</span><span class="oc">buy <b class="m">13·14h</b> · sell <b class="m">18·19h</b></span><span class="oc">committed <span class="m">2026-09-06T09:00Z</span>, before publication</span></div>
+  <div class="banner disclosure"><b>Disclosure.</b> Settlement price is the Elexon BMRS Market Index (APXMIDP leg): a traded within-day reference index that arrives progressively during the delivery day, not the GB day-ahead auction clearing price. Receipts are still committed before any price for the target day exists (leak-guarded). Because yesterday's profile is never complete at the pre-deadline tick, the Persistence v1 primary (and Rank-blend v1, which needs it) structurally never commit in this market — only Climatology v1 and Weekly v1 do. See VERIFY.md.</div>
+  <div class="banner"><b>Live · 7 settled days on shadow strategies
+    · no primary settlement yet.</b> The primary (Persistence v1) has committed <b>no receipt</b> in this market so far (0 of 9 target days) — only shadow strategies have; see the disclosure above and VERIFY.md.
+    Every receipt below was committed and pushed <i>before</i>
+    the first Market Index price for the target day exists (the index populates through the delivery day itself); settlements are appended the day after each target
+    day completes; nothing is backfilled.</div>
+  <h2>Strategy panel · settled days</h2>
+  <div class="tbl-wrap"><table>
+    <thead><tr><th>Target day</th><th>Climatology v1 · shadow</th><th>Weekly v1 · shadow</th></tr></thead>
+    <tbody><tr><td class="k">2026-08-31</td><td>+116.06&thinsp;£ (65.9% · tau 0.710)</td><td>+65.50&thinsp;£ (37.2% · tau 0.507)</td></tr>
+<tr><td class="k">2026-09-01</td><td>+240.51&thinsp;£ (98.9% · tau 0.848)</td><td>+240.51&thinsp;£ (98.9% · tau 0.812)</td></tr>
+<tr><td class="k">2026-09-02</td><td>+25.92&thinsp;£ (63.4% · tau 0.435)</td><td>+26.49&thinsp;£ (64.8% · tau 0.674)</td></tr>
+<tr><td class="k">2026-09-03</td><td>+262.25&thinsp;£ (91.6% · tau 0.891)</td><td>+20.87&thinsp;£ (7.3% · tau 0.268)</td></tr>
+<tr><td class="k">2026-09-04</td><td>+143.74&thinsp;£ (54.6% · tau 0.399)</td><td>+180.42&thinsp;£ (68.6% · tau 0.428)</td></tr>
+<tr><td class="k">2026-09-05</td><td>+367.20&thinsp;£ (94.7% · tau 0.739)</td><td>+294.13&thinsp;£ (75.8% · tau 0.051)</td></tr>
+<tr><td class="k">2026-09-06</td><td>+336.91&thinsp;£ (93.7% · tau 0.667)</td><td>+168.15&thinsp;£ (46.8% · tau 0.029)</td></tr></tbody>
+  </table></div>
+  <p class="note">no shared primary/shadow days yet.
+    Claims of superiority require the pre-registered bar (&ge;30 non-tied shared
+    days, sign-test p&lt;0.05) — see VERIFY.md. All 2 settled
+    strategies use identical costs; none can be revised after the fact.</p>
+  <h2>Open receipts · awaiting settlement</h2>
+  <div class="open-card" style="margin-bottom:10px"><span class="pending">Pending</span><span class="oc"><b>2026-09-07</b> · Climatology v1 · shadow</span><span class="oc">buy <b class="m">13·14h</b> · sell <b class="m">18·19h</b></span><span class="oc">committed <span class="m">2026-09-06T09:00Z</span>, before publication</span></div>
 <div class="open-card" style="margin-bottom:10px"><span class="pending">Pending</span><span class="oc"><b>2026-09-07</b> · Weekly v1 · shadow</span><span class="oc">buy <b class="m">11·12h</b> · sell <b class="m">19·20h</b></span><span class="oc">committed <span class="m">2026-09-06T09:00Z</span>, before publication</span></div>
 <div class="open-card" style="margin-bottom:10px"><span class="pending">Pending</span><span class="oc"><b>2026-09-08</b> · Climatology v1 · shadow</span><span class="oc">buy <b class="m">13·14h</b> · sell <b class="m">18·19h</b></span><span class="oc">committed <span class="m">2026-09-07T09:00Z</span>, before publication</span></div>
 <div class="open-card" style="margin-bottom:10px"><span class="pending">Pending</span><span class="oc"><b>2026-09-08</b> · Weekly v1 · shadow</span><span class="oc">buy <b class="m">12·13h</b> · sell <b class="m">19·20h</b></span><span class="oc">committed <span class="m">2026-09-07T09:00Z</span>, before publication</span></div>
   <footer>
-    <p>Paper money — no capital at stake. Prices: Elexon BMRS Market Index (Insights, open data). The ledger is
+    <p>Paper money — no capital at stake. Prices: Elexon BMRS Market Index (Insights, open data). Every receipt is
+      committed and pushed before the first Market Index price for the target day exists (the index populates through the delivery day itself). The ledger is
       append-only; each day's hash is OpenTimestamps-stamped at commit and
       Bitcoin-confirmed within days (a just-committed proof is <i>pending</i>
       until a block lands — see VERIFY.md for per-date status). Verify

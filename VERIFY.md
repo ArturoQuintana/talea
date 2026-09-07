@@ -17,39 +17,59 @@ Not every market carries the same strength of evidence yet; stated plainly:
 
 - **es** — OTS-anchored (Bitcoin) from 2026-08-08; git-corroborated from
   2026-07-30. The full three-tier story is in section 1.
-- **de** — OTS-stamped from 2026-08-27, but the proofs are still **"pending"**
-  (not yet Bitcoin-anchored — 1-2 days old; the weekly `ots upgrade` matures
-  them, same as ERCOT below); the earlier days (2026-08-24 → 08-26) are
-  git-attested only. **Evidence boundary (parallel to
+- **de** — OTS-stamped from 2026-08-27; the older proofs are Bitcoin-CONFIRMED
+  and only the newest (1-2 days old) are still "pending" until the weekly
+  `ots upgrade` matures them — check any date's actual state with `ots info
+  Data/de/ots/<date>.txt.ots` rather than trusting this sentence; the earlier
+  days (2026-08-24 → 08-26) are git-attested only. **Evidence boundary (parallel to
   ES's above):** DE ran first on its own public mirror (`germany-dayahead-ledger`,
   now frozen) and in the private code repo; DE's history entered THIS consolidated
   `talea` repo as a single bulk sync at the 2026-08-29 one-project consolidation.
   So the timing "weak check" (comparing a receipt's `committed_at` to the push
   time of the commit that introduced it) does NOT corroborate pre-2026-08-29 DE
-  dates *from this repo alone* — use the OTS proofs (08-27+, pending Bitcoin
-  upgrade), or the per-tick
+  dates *from this repo alone* — use the OTS proofs (08-27+), or the per-tick
   history in the private repo / the frozen `germany-dayahead-ledger` mirror (shown
   on request). Arithmetic and append-only hold regardless.
-- **ercot** — newly launched (2026-08-27); OTS-stamped from its first tick,
-  not yet Bitcoin-anchored (proofs still "pending" — 1-2 days old).
+- **ercot** — launched 2026-08-27; OTS-stamped from its first tick, and the
+  proofs are Bitcoin-CONFIRMED as they mature (the newest may still be
+  "pending" for 1-2 days — `ots info` on the file is the ground truth).
   **Evidence boundary** (same shape as DE's above): ERCOT's history entered
   THIS consolidated `talea` repo in the same 2026-08-29
   one-project-consolidation commit (`fd4bdd49`) that bulk-imported DE —
   `git log` shows no earlier commit touching `Data/ercot/`. So the timing
   "weak check" does NOT corroborate ERCOT's 2026-08-27/28 `committed_at`
   values *from this repo alone* either;
-  rely on the OTS manifests (pending Bitcoin anchor) or the GitHub Actions run
-  history for the `ercot.yml` workflow (shown on request) until the weekly OTS
-  upgrade matures. Arithmetic and append-only hold regardless.
-- **gb** — newly launched (2026-08-28); no settled day yet, so no arithmetic
-  or capture claim to make. It now has committed receipts (per-tick, from
-  2026-08-30) and OTS-stamped manifests from 2026-08-29 — the earliest already
-  Bitcoin-CONFIRMED, the newest still "pending" (same maturation lag as DE/
-  ERCOT above). GB entered this repo via its own per-tick commits, not a bulk
-  import, so (unlike DE/ERCOT) the "weak check" above corroborates its receipts
-  from this repository alone with no evidence-boundary caveat needed. The page
-  says "awaiting first settled day" and is honest about that; VERIFY.md's
-  per-date OTS status is above and in `Data/gb/ots/`.
+  rely on the OTS manifests or the GitHub Actions run history for the
+  `ercot.yml` workflow (shown on request). Arithmetic and append-only hold
+  regardless.
+- **gb** — launched 2026-08-28; committed receipts per-tick from 2026-08-30,
+  settled days from target 2026-08-31 (shadow strategies — see below), OTS-
+  stamped manifests from 2026-08-29 (the earliest Bitcoin-CONFIRMED, the newest
+  still "pending" — same maturation lag as DE/ERCOT). GB entered this repo via
+  its own per-tick commits, not a bulk import, so (unlike DE/ERCOT) the "weak
+  check" corroborates its receipts from this repository alone with no
+  evidence-boundary caveat. Every settled GB row re-derives from
+  `Data/gb/prices.json` with `verify_ledger.py --all` like any other market.
+  **Two GB-specific disclosures (independent audit, 2026-09-07):**
+  (1) *The feed is not a day-ahead auction.* GB settles against the Elexon BMRS
+  Market Index (APXMIDP leg): a traded within-day reference index that
+  populates progressively through the delivery day itself (the git history of
+  `Data/gb/prices.json` shows each tick's last stored hour ~1h before the
+  tick), not the GB day-ahead auction clearing price (EPEX/N2EX, licence-
+  restricted). The commit-before-truth claim still holds — at the 09:00 UTC
+  tick no price for the target day exists, so the leak guard is satisfied and
+  the receipt predates every price it is judged against — but "day-ahead" here
+  means "committed the day before, settled on an ex-post traded index", which
+  a skeptic should weigh differently from ES/DE/ERCOT's auction clearing prices.
+  (2) *The primary strategy never commits in GB, by construction.* Persistence
+  needs yesterday's COMPLETE 24-hour profile at the pre-deadline tick; under
+  this feed today's hours are still arriving, so `battery-2h2h-persistence`
+  (and `rankblend`, which needs it) have ZERO GB receipts — only climatology
+  and weekly commit. This is a structural property of the feed, not an outage
+  or a missed day, and it is why the GB page shows a shadow-only panel with no
+  primary total. Whether GB moves to a genuine day-ahead source is an open
+  user decision; until then this bullet and the page's Disclosure banner
+  state the situation as it is.
 
 ## 1. The timing claim (receipts predate the auction)
 
@@ -74,7 +94,13 @@ just-created proof may still be "pending" — re-run `ots upgrade` later.)
 2026-08-10: days before that date entered it in one bulk commit, so the
 "weak check" above cannot corroborate them from this repository alone (the
 private operations repository holds their per-tick commit history, shown on
-request). OTS attestation begins 2026-08-08; the first week (2026-07-30 →
+request). Precisely (independent audit, 2026-09-07): the mirror's first
+commit landed at ~22:59 UTC on 2026-08-10 — AFTER that day's 13:15 CET
+publication — so the receipt for target 2026-08-11 (committed the morning of
+08-10) is not weak-check-corroborated either; per-tick corroboration from this
+repository starts at target 2026-08-12. The 08-11 receipt is covered by the
+strong check (its 2026-08-10 manifest is Bitcoin-confirmed). OTS attestation
+begins 2026-08-08; the first week (2026-07-30 →
 2026-08-07) has no Bitcoin anchoring and cannot acquire it retroactively —
 timestamps cannot be backdated, which is the entire point of the mechanism.
 Treat the record as three tiers of strength: OTS-anchored (2026-08-08+),
@@ -139,7 +165,9 @@ diffs it against `ledger.jsonl` line by line. It also re-checks the leak guard
 (every receipt's `committed_at` predates its target day), the append-only
 property (each anchored OTS manifest's SHA-256 must match a prefix of the
 current file — a rewritten history matches nothing and FAILs), and reports how
-many receipts are Bitcoin-covered. Exit code 0 = every check passed. It ships
+many receipts are OTS-covered (a stamped manifest exists for them; whether that
+proof is still *pending* or already Bitcoin-confirmed is only checked with
+`--verify-ots`, which shells `ots verify` per proof). Exit code 0 = every check passed. It ships
 with its own tamper tests (`tests/test_verify_ledger.py`): the checker is
 proven to FAIL on a doctored P&L, altered hours, a leaked receipt, an orphan
 settlement, and a rewritten manifest — a re-derivation that cannot fail proves

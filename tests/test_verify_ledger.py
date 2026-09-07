@@ -126,7 +126,31 @@ def test_valid_ots_prefix_is_covered(market):
     (ots / "2026-01-02.txt.ots").write_bytes(b"\x00proof")
     rep = vl.verify_market("es", verify_ots=False)
     assert rep.fails == [], rep.fails
-    assert any("Bitcoin-covered 1/1" in m for m in rep.info), rep.info
+    assert any("OTS-covered 1/1" in m for m in rep.info), rep.info
+
+
+def test_default_report_never_claims_bitcoin_finality(market):
+    """Audit finding 2026-09-07: without --verify-ots the checker only proves a
+    .ots proof EXISTS and the manifest hashes a prefix of the file — it cannot
+    tell a PENDING (calendar-only) proof from a Bitcoin-confirmed one, yet its
+    default output said "manifests anchored" / "receipts Bitcoin-covered N/N"
+    (on the day of the audit, receipts covered only by still-pending 09-06
+    proofs were counted as "Bitcoin-covered"). The default report must say
+    OTS-stamped/OTS-covered and point at --verify-ots for finality — the
+    generated pages already had to learn this lesson (2026-08-29)."""
+    _faithful(market)
+    ots = market / "ots"
+    ots.mkdir()
+    digest = hashlib.sha256((market / "receipts.jsonl").read_bytes()).hexdigest()
+    (ots / "2026-01-02.txt").write_text(
+        "esios-paper audit manifest 2026-01-02\n"
+        f"sha256(receipts.jsonl)={digest}\n"
+        "sha256(ledger.jsonl)=absent\n")
+    (ots / "2026-01-02.txt.ots").write_bytes(b"\x00pending-proof")
+    rep = vl.verify_market("es", verify_ots=False)
+    blob = "\n".join(rep.info + rep.warns)
+    assert "Bitcoin-covered" not in blob and "anchored" not in blob, blob
+    assert "OTS-stamped" in blob and "--verify-ots" in blob, blob
 
 
 # ---- verify_market: the remaining fail/warn branches -------------------------
@@ -198,7 +222,7 @@ def test_unanchored_manifest_warns(market):
     ots = market / "ots"; ots.mkdir()
     (ots / "m.txt").write_text("manifest\n")    # no .txt.ots alongside
     rep = vl.verify_market("es", verify_ots=False)
-    assert any("no anchored manifests" in w for w in rep.warns), rep.warns
+    assert any("no OTS-stamped manifests" in w for w in rep.warns), rep.warns
 
 
 def test_load_prices_accepts_dict_form(market):

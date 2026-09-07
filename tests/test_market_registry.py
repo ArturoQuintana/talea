@@ -46,3 +46,27 @@ def test_every_market_has_presentation_and_a_tz_label():
         assert m.presentation.title, f"{slug} has no dashboard title"
         assert m.presentation.tz_label, f"{slug} has no tz label"
         assert m.presentation.tab_name, f"{slug} has no tab name"
+
+
+def test_every_public_market_states_its_own_publication_label():
+    """Audit note 2026-09-07: the DE and ERCOT public pages quoted Spain's
+    '~13:15 CET' publication time because the renderer had one hardcoded clock.
+    A PUBLIC market must carry its own `presentation.publication` label so a
+    future public market cannot silently inherit another market's clock (the
+    renderer's fallback is deliberately generic, never another market's time)."""
+    for m in reg.public_markets():
+        assert m.presentation.publication, \
+            f"public market {m.slug!r} has no presentation.publication label"
+        assert "13:15" not in m.presentation.publication or m.slug == "es", \
+            f"{m.slug!r} quotes Spain's 13:15 publication time"
+
+
+def test_gb_discloses_its_within_day_index_feed():
+    """Audit finding F2 (2026-09-07): GB settles against the Elexon Market
+    Index (APXMIDP), a traded within-day index that populates through the
+    delivery day — not a day-ahead auction — so the persistence primary
+    structurally never commits there. The registry entry must carry that
+    disclosure (rendered on the public page) until the feed changes."""
+    note = reg.MARKETS["gb"].presentation.note
+    assert "Market Index" in note and "not the GB day-ahead auction" in note
+    assert "Persistence v1" in note and "never commit" in note

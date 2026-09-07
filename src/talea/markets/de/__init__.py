@@ -17,4 +17,6 @@ MARKET = Market.make("de", "Europe/Berlin", fetch_hourly,
                      presentation=Presentation(
                          title="German (DE-LU) day-ahead battery arbitrage",
                          tab_name="Germany", tz_label="Berlin",
-                         source="Bundesnetzagentur | SMARD.de (CC BY 4.0)"))
+                         source="Bundesnetzagentur | SMARD.de (CC BY 4.0)",
+                         publication="the D+1 auction publishes (EPEX SPOT "
+                                     "DE-LU via SMARD, ~12:40-13:00 CET)"))

@@ -19,4 +19,5 @@ MARKET = Market.make("ercot", "America/Chicago", make_fetch("HB_NORTH"),
                      presentation=Presentation(
                          title="ERCOT (HB_NORTH) day-ahead battery arbitrage",
                          tab_name="ERCOT", tz_label="Chicago",
-                         source="ERCOT public data (NP4-190, DAM SPP)"))
+                         source="ERCOT public data (NP4-190, DAM SPP)",
+                         publication="the DAM publishes (~13:30 CT)"))

@@ -25,9 +25,19 @@ strategy panel, P&L math, and guards are shared). Eight markets run today:
     IT      IT-SUD    ENTSO-E A44 · token, derived    EUR  12:00     server        private (license)
     PT      PT        ENTSO-E A44 · token, derived    EUR  12:00     server        private (license)
     FR      France    ENTSO-E A44 · token, derived    EUR  12:00     server        private (license)
-    GB      GB        Elexon BMRS · open (Insights)   GBP  11:00     server        Pages + OTS
+    GB      GB        Elexon BMRS Market Index · open  GBP  11:00     server        Pages + OTS (within-day index feed, see note)
     JP      JEPX      JEPX spot · open (attribution)  JPY  10:00     GitHub Actions private (silent-first; redistributable)
-    ERCOT   HB_NORTH  ERCOT MIS NP4-190 · public/redist USD 10:00    GitHub Actions Pages (git-attested)
+    ERCOT   HB_NORTH  ERCOT MIS NP4-190 · public/redist USD 10:00    GitHub Actions Pages + OTS
+
+GB note (audit finding 2026-09-07): GB's feed is the Elexon BMRS Market Index
+(APXMIDP leg) — a traded within-day reference index that populates
+progressively through the delivery day, NOT the GB day-ahead auction clearing
+price. Receipts are still leak-guarded (no price for the target day exists at
+the 09:00 UTC tick), but yesterday's profile is never complete at that tick, so
+the persistence primary (and rank-blend, which needs it) structurally never
+commit in GB; only climatology and weekly do. Disclosed on gb.html
+(`presentation.note`) and in VERIFY.md; whether to move GB to a genuine
+day-ahead source is a user decision (escalated 2026-09-07).
 
 Two writers, not one: the server writes ES/DE/IT/PT/FR/GB; ERCOT and JP are driven from
 GitHub Actions runners (ERCOT DAM geo-blocks EU IPs; JEPX publishes ~10:10 JST,

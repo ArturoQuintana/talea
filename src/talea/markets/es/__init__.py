@@ -22,4 +22,5 @@ MARKET = Market("es", MARKET_TZ, 13, "EUR", PRICES, RECEIPTS, LEDGER, fetch_hour
                     title="Spanish day-ahead battery arbitrage",
                     tab_name="Spain", tz_label="Madrid", show_gate=True,
                     source="apidatos.ree.es,\n      cross-checked weekly against "
-                           "the independent token ESIOS route"))
+                           "the independent token ESIOS route",
+                    publication="the D+1 auction publishes (~13:15 CET)"))

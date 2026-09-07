@@ -195,6 +195,98 @@ def test_awaiting_page_when_no_settled_day(monkeypatch, tmp_path):
     assert "+0.00" not in html
 
 
+W = "battery-2h2h-weekly"
+
+
+def test_shadow_settlements_are_never_hidden_behind_the_awaiting_page(
+        monkeypatch, tmp_path):
+    """Audit finding F1 (2026-09-07): GB's page said 'Live - awaiting first
+    settled day' and labelled all 16 receipts 'Pending' while ledger.jsonl held
+    12 settled shadow rows — build() switched to the awaiting template whenever
+    the PRIMARY had no settlement, ignoring shadow settlements. Exact GB shape:
+    climatology + weekly receipts for 3 targets, the first 2 settled, the
+    primary has never committed anything. The page must show the settled
+    shadow days with their P&L, mark ONLY the unsettled receipts pending, and
+    disclose that the primary has never committed here."""
+    receipts = [_receipt(t, b, s)
+                for t, b in (("2026-08-31", "2026-08-30"), ("2026-09-01", "2026-08-31"),
+                             ("2026-09-02", "2026-09-01"))
+                for s in (C, W)]
+    ledger = [_settle("2026-08-31", C, 116.06, 176.12, 0.659),
+              _settle("2026-08-31", W, 65.50, 176.12, 0.372),
+              _settle("2026-09-01", C, 240.51, 243.19, 0.989),
+              _settle("2026-09-01", W, 240.51, 243.19, 0.989)]
+    _seed(monkeypatch, tmp_path, "gb",
+          ["2026-08-30", "2026-08-31", "2026-09-01"], ledger, receipts)
+    html = rd.build("gb")
+    assert "awaiting first settled day" not in html      # the contradiction is gone
+    assert "2 settled days on shadow strategies" in html
+    assert "+116.06" in html and "+240.51" in html       # settled shadow P&L shown
+    assert "Climatology v1 · shadow" in html and "Weekly v1 · shadow" in html
+    assert html.count(">Pending<") == 2                  # only the 09-02 pair
+    assert "2026-09-02" in html
+    assert "committed <b>no receipt</b> in this market so far (0 of 3 target days)" in html
+    assert "+0.00" not in html                           # no fake primary total
+
+
+def test_awaiting_page_only_when_nothing_at_all_has_settled(monkeypatch, tmp_path):
+    """The awaiting template stays correct for its ONE honest case: an empty
+    ledger. Shadow-only receipts with no settlement still render it."""
+    receipts = [_receipt("2026-08-31", "2026-08-30", C)]
+    _seed(monkeypatch, tmp_path, "gb", ["2026-08-30"], [], receipts)
+    html = rd.build("gb")
+    assert "awaiting first settled day" in html and html.count(">Pending<") == 1
+
+
+def test_footer_publication_time_is_per_market(monkeypatch, tmp_path):
+    """Audit note (2026-09-07): de.html and ercot.html footers quoted Spain's
+    '~13:15 CET' as THEIR publication time (SMARD DE-LU is ~12:40-13:00 CET,
+    ERCOT DAM ~13:30 CT) — the template had one hardcoded clock for every
+    market. The footer must take the label from the market's own registry
+    entry, on the full page AND the awaiting/shadow pages."""
+    for slug in ("es", "de", "ercot", "gb"):
+        _seed(monkeypatch, tmp_path, slug, ["2026-08-12", "2026-08-13"],
+              [_settle("2026-08-13", P, 100.0, 120.0, 0.83)],
+              [_receipt("2026-08-13", "2026-08-12", P)])
+    es, de, ercot, gb = (rd.build(s) for s in ("es", "de", "ercot", "gb"))
+    assert "13:15 CET" in es
+    assert "13:15" not in de and "12:40-13:00 CET" in de
+    assert "13:15" not in ercot and "13:30 CT" in ercot
+    assert "13:15" not in gb and "Market Index" in gb
+    # awaiting template (empty ledger) — same rule
+    _seed(monkeypatch, tmp_path / "aw", "de", ["2026-08-12"], [],
+          [_receipt("2026-08-13", "2026-08-12", P)])
+    aw = rd.build("de")
+    assert "awaiting first settled day" in aw and "13:15" not in aw \
+        and "12:40-13:00 CET" in aw
+
+
+def test_market_disclosure_note_renders_on_every_template(monkeypatch, tmp_path):
+    """Audit finding F2 (2026-09-07): GB settles against the Elexon Market Index
+    — a traded within-day index that arrives progressively, not a day-ahead
+    auction — so the persistence primary structurally never commits there, and
+    neither the page nor VERIFY.md said so. The registry's `presentation.note`
+    must render verbatim as a Disclosure banner on the full, shadow-only and
+    awaiting templates; markets with no note render no banner."""
+    gb_note = rd.MARKETS["gb"]["note"]
+    assert "Market Index" in gb_note and "never commit" in gb_note
+    seeds = {
+        "full": ([_settle("2026-08-13", P, 100.0, 120.0, 0.83)],
+                 [_receipt("2026-08-13", "2026-08-12", P)]),
+        "shadow": ([_settle("2026-08-13", C, 100.0, 120.0, 0.83)],
+                   [_receipt("2026-08-13", "2026-08-12", C)]),
+        "awaiting": ([], [_receipt("2026-08-13", "2026-08-12", C)]),
+    }
+    for name, (ledger, receipts) in seeds.items():
+        _seed(monkeypatch, tmp_path / name, "gb", ["2026-08-12", "2026-08-13"],
+              ledger, receipts)
+        html = rd.build("gb")
+        assert "<b>Disclosure.</b>" in html and gb_note in html, name
+    _seed(monkeypatch, tmp_path, "de", ["2026-08-12", "2026-08-13"],
+          *seeds["full"])
+    assert "Disclosure." not in rd.build("de")
+
+
 def test_nav_links_all_markets_and_marks_current(monkeypatch):
     nav = rd._nav(["es", "de", "gb"], "de", "es")
     assert ">Talea<" in nav
