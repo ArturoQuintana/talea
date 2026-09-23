@@ -86,8 +86,25 @@ def test_build_es_core_numbers_and_gate(monkeypatch, tmp_path):
     assert "over 1 shared days" in html              # climatology-vs-primary pair note
     assert "GBM v2 gate" in html and "1 / 21" in html  # ES-only gate tile
     assert "Escalation gate" in html
+    assert "evaluate at settled day 21" in html       # bar not reached: future tense
+    assert "evaluate ~21 Aug" not in html
     # the open 2026-08-14 receipt renders a pending card
     assert "Pending" in html and "2026-08-14" in html
+
+
+def test_gate_tile_reports_the_verdict_once_the_bar_is_reached(monkeypatch, tmp_path):
+    """Audit note N1 (2026-09-23): index.html's gate tile still read "settled
+    days · evaluate ~21 Aug" — a frozen future-tense label — a month after the
+    verdict was delivered (docs/gate-verdict-2026-08.md, 2026-08-21). With >=
+    GATE_DAYS settled primary days the tile and section must state the verdict."""
+    days = [f"2026-08-{d:02d}" for d in range(1, 23)]
+    ledger = [_settle(d, P, 100.0, 120.0, 0.83) for d in days]
+    receipts = [_receipt(d, "2026-07-31", P) for d in days]
+    _seed(monkeypatch, tmp_path, "es", days, ledger, receipts)
+    html = rd.build("es")
+    assert "21 / 21" in html
+    assert "evaluated 21 Aug 2026" in html and "verdict: holding, v2 not built" in html
+    assert "evaluate ~21 Aug" not in html and "~21 Aug 2026" not in html
 
 
 def test_build_counts_missed_days(monkeypatch, tmp_path):

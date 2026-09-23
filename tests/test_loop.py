@@ -268,6 +268,65 @@ def test_our_code_bug_crashes_not_swallowed_as_fetch_failure():
         tick(fetch=buggy, today=date(2026, 8, 2), sleep=lambda _s: None)
 
 
+def test_fetch_start_reaches_back_to_an_interior_hole():
+    """Audit finding F1 (2026-09-23): DE's dataset held 09-12 and 09-14 but no
+    09-13 hour at all, and the tick's fetch window started at the NEWEST stored
+    day, so the hole was never re-requested and four 09-13 receipts sat
+    unsettled for 10 days. The window must start at the earliest missing day
+    (bounded by the lookback), not at the newest stored one."""
+    prices = {**_flat_day("2026-09-12", 60), **_flat_day("2026-09-14", 60)}
+    assert loop.fetch_start(prices, date(2026, 9, 15)) == date(2026, 9, 13)
+    # no hole -> unchanged behaviour: start at the newest stored day
+    full = {**prices, **_flat_day("2026-09-13", 60)}
+    assert loop.fetch_start(full, date(2026, 9, 15)) == date(2026, 9, 14)
+    # a hole older than the lookback is history, not chased every tick
+    assert loop.fetch_start(prices, date(2026, 10, 30)) == date(2026, 9, 14)
+    # empty dataset -> the fixed origin, as before
+    assert loop.fetch_start({}, date(2026, 9, 15)) == date(2026, 1, 26)
+
+
+def test_merge_fetched_fills_a_hole_but_never_rewrites_settled_history():
+    stored = {**_flat_day("2026-09-12", 60), **_flat_day("2026-09-14", 60)}
+    revised = {k: v + 1 for k, v in _flat_day("2026-09-12", 60).items()}
+    fetched = {**revised, **_flat_day("2026-09-13", 70),
+               **_flat_day("2026-09-14", 80), "2026-09-15T00": 5.0}
+    out = loop.merge_fetched(stored, fetched)
+    assert out["2026-09-12T00"] == 60.0          # earlier day: a revision is ignored
+    assert out["2026-09-13T00"] == 70.0          # the hole is filled
+    assert out["2026-09-14T00"] == 80.0          # newest stored day may complete/refresh
+    assert out["2026-09-15T00"] == 5.0
+    assert stored["2026-09-12T00"] == 60.0       # pure: input untouched
+
+
+def test_tick_backfills_a_skipped_day_and_settles_its_receipts():
+    """End-to-end reproduction of DE 2026-09-13: the day the feed skipped must
+    be re-requested on a later tick (the fake feed honours [start, end], so a
+    window starting at the newest stored day can never return it) and the
+    receipts committed for it must then settle."""
+    feed: dict[str, float] = {}
+
+    calls: list[tuple[date, date]] = []
+
+    def fetch(a, b):
+        calls.append((a, b))
+        return {k: v for k, v in feed.items() if a.isoformat() <= k[:10] <= b.isoformat()}
+
+    feed.update(_flat_day("2026-09-12", 60))
+    s = tick(fetch=fetch, today=date(2026, 9, 12))
+    assert any(r["target"] == "2026-09-13" for r in s["committed"])
+    # 09-13 tick: the feed serves 09-14 but SKIPS 09-13 (the SMARD gap)
+    feed.update(_flat_day("2026-09-14", 60))
+    s = tick(fetch=fetch, today=date(2026, 9, 13))
+    assert s["settled"] == []
+    # 09-14 tick: the feed now has 09-13 too; the window must reach back for it
+    feed.update(_flat_day("2026-09-13", 60, cheap=(1, 2), dear=(18, 19)))
+    s = tick(fetch=fetch, today=date(2026, 9, 14))
+    assert calls[-1][0] == date(2026, 9, 13), calls[-1]
+    assert {e["target"] for e in s["settled"]} == {"2026-09-13"}
+    stored = loop.load_prices()
+    assert "2026-09-13T01" in stored and stored["2026-09-13T01"] == 10.0
+
+
 def test_validate_prices_rails():
     ok = {"2026-08-01T03": -5.0, "2026-08-01T04": 3999.9}
     assert loop.validate_prices(ok) is None

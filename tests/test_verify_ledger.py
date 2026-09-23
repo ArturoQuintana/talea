@@ -355,3 +355,28 @@ def test_capture_none_vs_number_is_caught(market):
     _write(market, [rec], [entry], prices=flat)
     rep = vl.verify_market("es", verify_ots=False)
     assert any("re-derived None" in f for f in rep.fails), rep.fails
+
+
+def test_unsettled_receipt_with_a_hole_in_the_dataset_is_flagged(market):
+    """Audit finding F1 (2026-09-23): four DE receipts for 2026-09-13 sat
+    unsettled for 10 days because prices.json had NO 09-13 hour while 09-14
+    onward were stored — a hole in the dataset of record that no check named
+    (the page just said "Pending"). An open receipt whose target is >= HOLE_DAYS
+    behind the newest stored day, with no/partial prices, must WARN."""
+    rec, _ = _faithful(market)
+    later = [{"ts": f"2026-01-04T{h:02d}:00:00", "price": 50.0 + h} for h in range(24)]
+    _write(market, [rec], [], prices=later)          # 01-02 absent, 01-04 stored
+    rep = vl.verify_market("es", verify_ots=False)
+    assert rep.fails == []
+    assert any("HOLE" in w and str((TARGET, rec["strategy"], "1")) in w
+               for w in rep.warns), rep.warns
+    # a one-day publication lag is not a hole (newest stored day = target + 1)
+    next_day = [{"ts": f"2026-01-03T{h:02d}:00:00", "price": 50.0 + h} for h in range(24)]
+    _write(market, [rec], [], prices=next_day)
+    rep = vl.verify_market("es", verify_ots=False)
+    assert not any("HOLE" in w for w in rep.warns), rep.warns
+    # a partially-published target (12 of 24 hours) behind newer days is a hole too
+    partial = [{"ts": f"{TARGET}T{h:02d}:00:00", "price": 100.0 + h} for h in range(12)]
+    _write(market, [rec], [], prices=partial + later)
+    rep = vl.verify_market("es", verify_ots=False)
+    assert any("HOLE" in w and "12 hour(s)" in w for w in rep.warns), rep.warns

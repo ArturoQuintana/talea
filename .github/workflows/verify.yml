@@ -1,4 +1,4 @@
-# Runs ON THE PUBLIC MIRROR (spain-dayahead-ledger), not the private repo, so
+# Runs ON THE PUBLIC MIRROR (github.com/ArturoQuintana/talea), not the private repo, so
 # the green badge in the README is a real, anonymously-verifiable check: GitHub's
 # own infra independently re-derives every settlement in this repo from the raw
 # prices + receipts and fails if anything doesn't reconcile. verify_ledger.py is

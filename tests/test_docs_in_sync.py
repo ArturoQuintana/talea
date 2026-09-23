@@ -245,3 +245,35 @@ def test_mirror_is_deny_by_default_allowlist():
         assert f"--include='/{slug}/" not in txt and f'--include="/{slug}/' not in txt, \
             (f"{slug!r} is PRIVATE but explicitly --include'd in the mirror "
              f"allowlist — a private market must never be published.")
+
+
+_NUMBER_WORDS = {"two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+                 "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12}
+
+
+def test_architecture_market_count_words_match_the_registry():
+    """Audit finding D2 (2026-09-23): ARCHITECTURE.md said "eight markets run
+    today" in one paragraph and "all seven markets are vertical modules" in
+    another — a count that was bumped in one place when JP was registered and
+    not the other. Every spelled-out "<N> markets" in the doc must equal the
+    registry's size, so the next market registration cannot leave a stale count."""
+    counts = {w.lower() for w in re.findall(
+        r"\b([A-Za-z]+)\s+markets\b", ARCHITECTURE) if w.lower() in _NUMBER_WORDS}
+    assert counts, "expected ARCHITECTURE.md to state the market count in words"
+    wrong = sorted(w for w in counts if _NUMBER_WORDS[w] != len(MARKETS))
+    assert not wrong, (
+        f"docs/ARCHITECTURE.md says '{wrong[0]} markets' but the registry has "
+        f"{len(MARKETS)} — update every spelled-out count when a market is added")
+
+
+def test_published_mirror_files_do_not_name_the_dead_repo():
+    """Audit finding D2 (2026-09-23): the workflow shipped to the public mirror
+    (mirror/verify.yml) still introduced itself as running on
+    'spain-dayahead-ledger', a repo renamed to `talea` on 2026-08-29. Files
+    copied VERBATIM onto the mirror by publish_mirror.sh must not carry the dead
+    name (incidents.md is exempt: it records history)."""
+    for rel in ("mirror/verify.yml", "README-public.md", "VERIFY.md",
+                "GOVERNANCE.md", "DATA-SOURCES.md", "docs/ARCHITECTURE.md"):
+        txt = (ROOT / rel).read_text()
+        assert "spain-dayahead-ledger" not in txt, \
+            f"{rel} names the dead repo 'spain-dayahead-ledger' (renamed to talea)"

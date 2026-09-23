@@ -309,6 +309,48 @@ def day_profile(prices: dict[str, float], d: date) -> dict[int, float]:
     return {int(ts[11:13]): p for ts, p in prices.items() if ts[:10] == key}
 
 
+GAP_LOOKBACK_DAYS = 14   # how far back a tick re-requests a day it never stored
+
+
+def fetch_start(prices: dict[str, float], today: date,
+                lookback_days: int = GAP_LOOKBACK_DAYS) -> date:
+    """The first day a tick asks the feed for. Normally the newest stored day
+    (re-fetched so a partially-published day completes). BUT an interior HOLE
+    — a day with NO stored hour while a LATER day is already stored — must be
+    re-requested too, else it is permanent: the old rule started at the newest
+    stored day and never looked back, so one skipped publication (DE
+    2026-09-13, SMARD served 09-12 and 09-14 but not 09-13 on the ticks that
+    asked; audit finding F1 2026-09-23) left four receipts unsettleable
+    forever and an undisclosed hole in the dataset of record. Bounded by
+    `lookback_days` so the request stays small and a hole older than that is
+    left as history, not chased every tick."""
+    if not prices:
+        return date(2026, 1, 26)
+    newest = date.fromisoformat(max(prices)[:10])
+    stored_days = {ts[:10] for ts in prices}
+    floor = today - timedelta(days=lookback_days)
+    d = max(floor, date.fromisoformat(min(stored_days)))
+    while d < newest:
+        if d.isoformat() not in stored_days:
+            return d
+        d += timedelta(days=1)
+    return newest
+
+
+def merge_fetched(prices: dict[str, float], fetched: dict[str, float]) -> dict[str, float]:
+    """Merge a fetch into the dataset of record. Hours on/after the newest stored
+    day overwrite (that day may have been partial); hours on EARLIER days are
+    only ever ADDED, never overwritten — settled ledger rows quote the stored
+    prices, and a source revision must not silently move the record they were
+    settled against (verify_ledger would flag it as tampering). Pure."""
+    newest = max(prices)[:10] if prices else ""
+    out = dict(prices)
+    for ts, p in fetched.items():
+        if ts[:10] >= newest or ts not in out:
+            out[ts] = p
+    return out
+
+
 def pick_hours(profile: dict[int, float], n: int = N_HOURS) -> tuple[list[int], list[int]]:
     """(buy_hours, sell_hours): the n cheapest / n dearest hours of `profile`.
     Ties break toward the earlier hour (sorted by (price, hour)) — deterministic."""
@@ -461,8 +503,7 @@ def tick(*, market: Market | None = None, fetch=None, today: date | None = None,
                      "settled": [], "committed": [], "skipped": []}
 
     prices = load_prices(market.prices_path)
-    last_ts = max(prices) if prices else "2026-01-26T23"
-    fetch_from = date.fromisoformat(last_ts[:10])
+    fetch_from = fetch_start(prices, today)
     retries = market.fetch_retries
     for attempt in range(1 + len(retries)):
         try:
@@ -470,7 +511,7 @@ def tick(*, market: Market | None = None, fetch=None, today: date | None = None,
             bad = validate_prices(fetched, market.currency)
             if bad:
                 raise ValueError(bad)
-            prices.update(fetched)
+            prices = merge_fetched(prices, fetched)
             save_prices(prices, market.prices_path)
             summary.pop("fetch_error", None)
             break

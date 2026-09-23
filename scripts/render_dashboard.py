@@ -22,6 +22,12 @@ NAMES = {"battery-2h2h-persistence": "Persistence v1",
          "battery-2h2h-rankblend": "Rank-blend v1",
          "battery-2h2h-weekly": "Weekly v1"}
 GATE_DAYS = 21
+# The gate was EVALUATED on the 21st settled day (docs/gate-verdict-2026-08.md,
+# 2026-08-21, referee-confirmed: "holding" band -> pre-registered default, v2 not
+# built). Once the bar is reached the tile must say so — a frozen "evaluate ~21
+# Aug" read as a future event on a September page (audit note N1, 2026-09-23).
+GATE_VERDICT_DATE = "21 Aug 2026"
+GATE_VERDICT = "verdict: holding, v2 not built"
 CUR_SYMBOL = {"EUR": "€", "GBP": "£", "USD": "$", "JPY": "¥"}
 
 # Per-market presentation is DERIVED from the market registry (the single source
@@ -403,17 +409,23 @@ def build(slug: str = "es") -> str:
     if cfg["gate"]:
         gate_cells = "".join(f'<i class="{"done" if i < len(prim) else ""}"></i>'
                              for i in range(GATE_DAYS))
+        if len(prim) >= GATE_DAYS:
+            gate_status = f"evaluated {GATE_VERDICT_DATE} · {GATE_VERDICT}"
+            gate_when = f"evaluated {GATE_VERDICT_DATE} — {GATE_VERDICT}"
+        else:
+            gate_status = f"evaluate at settled day {GATE_DAYS}"
+            gate_when = f"at settled day {GATE_DAYS}"
         gate_tile = (
             '<div class="tile"><div class="k">GBM v2 gate</div>'
             f'<div class="v">{min(len(prim), GATE_DAYS)} / {GATE_DAYS}</div>'
-            '<div class="s">settled days · evaluate ~21 Aug</div></div>')
+            f'<div class="s">settled days · {gate_status}</div></div>')
         gate_section = (
             '<h2>Escalation gate</h2><div class="gate">'
             '<div class="gl"><span>Progress to the GBM&nbsp;v2 evaluation</span>'
             f'<span class="m">{min(len(prim), GATE_DAYS)} of {GATE_DAYS} settled days</span></div>'
             f'<div class="gate-cells">{gate_cells}</div>'
             '<div class="gl"><span>Evaluation criteria frozen in advance; stop '
-            'conditions pre-registered</span><span class="m">~21 Aug 2026</span></div></div>')
+            f'conditions pre-registered</span><span class="m">{gate_when}</span></div></div>')
     else:
         gate_tile = (
             '<div class="tile"><div class="k">Market</div>'

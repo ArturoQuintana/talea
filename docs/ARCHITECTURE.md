@@ -58,7 +58,7 @@ CONTRACT (the `Fetcher` protocol + the re-exported `Market`/`Presentation` types
 which stay defined in the `loop.py` core) lives in `markets/base.py`. Drift is
 caught by `test_market_registry.py` + `test_market_conformance.py` (every market
 has its guards) + `test_docs_in_sync` (this table must match the registry's flags).
-Per-market VERTICAL modules (`markets/<slug>/`): **all seven markets are vertical
+Per-market VERTICAL modules (`markets/<slug>/`): **all eight markets are vertical
 modules now** (Phase 2 code refactor complete), and **ES data lives at `Data/es/`
 like every other market** (Stage B, 2026-08-28) — `Data/` root holds only
 shared/project artifacts (`esios_prices.json` deep history, `calibration/`) plus one

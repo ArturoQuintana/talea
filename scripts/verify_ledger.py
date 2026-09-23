@@ -30,6 +30,8 @@ DATA = Path(__file__).resolve().parents[1] / "Data"
 PNL_TOL = 0.005      # ledger pnl/oracle are rounded to 2 dp
 CAP_TOL = 0.0005     # capture rounded to 3 dp
 MIN_DAY_HOURS = 23   # a fully-published day (23 on the DST-spring day)
+HOLE_DAYS = 2        # an unsettled target this many days behind the newest stored
+                     # day, with no/partial prices, is a hole in the dataset of record
 OTS_CLIENT = "opentimestamps-client==0.7.2"   # pinned (see __main__.OTS_CLIENT)
 
 
@@ -179,7 +181,12 @@ def verify_market(slug: str, verify_ots: bool) -> Report:
             r.warn(f"{key}: committed_at {committed} later than basis_day {basis} "
                    f"(late but pre-target — recovery tick?)")
 
-    # 3) receipts whose day is fully published but not yet settled
+    # 3) receipts whose day is fully published but not yet settled — and receipts
+    #    whose target the dataset of record has SKIPPED: a later day is stored
+    #    but the target has no/partial hours, so it can never settle (audit
+    #    finding F1 2026-09-23: DE 2026-09-13 sat in limbo 10 days unnoticed —
+    #    the dashboard showed "Pending", no check named the hole).
+    newest_day = max(prices)[:10] if prices else ""
     for key, rec in rec_by_key.items():
         if key in led_by_key:
             continue
@@ -187,6 +194,12 @@ def verify_market(slug: str, verify_ots: bool) -> Report:
         chosen = rec["buy_hours"] + rec["sell_hours"]
         if len(actual) >= MIN_DAY_HOURS and all(h in actual for h in chosen):
             r.warn(f"{key}: target fully published but UNSETTLED (settles next tick?)")
+        elif newest_day and (date.fromisoformat(newest_day)
+                             - date.fromisoformat(rec["target"])).days >= HOLE_DAYS:
+            r.warn(f"{key}: UNSETTLED and prices.json holds only {len(actual)} hour(s) "
+                   f"for its target although the dataset already runs to {newest_day} "
+                   f"— a HOLE in the dataset of record (fetch skipped the day); the "
+                   f"receipt is in limbo until the day is backfilled or declared missed")
 
     # 4) OpenTimestamps coverage (append-only proof + anchor count)
     ots_dir = d / "ots"
