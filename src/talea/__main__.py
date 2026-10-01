@@ -9,10 +9,13 @@ import statistics
 import subprocess
 import sys
 import urllib.request
+from datetime import datetime, timezone
 from email.message import EmailMessage
 from math import comb
 from pathlib import Path
+from types import SimpleNamespace
 
+from .liveness import assess, describe
 from .loop import (DATA_DIR, LEDGER, RECEIPTS, STRATEGY, WriterLockError,
                    _load_jsonl, tick, writer_lock)
 
@@ -57,7 +60,18 @@ def _sign_p(wins: int, n: int) -> float:
     return sum(comb(n, i) for i in range(wins, n + 1)) / 2 ** n
 
 
-def build_digest() -> tuple[str, str] | None:
+def _liveness_rows(now: datetime) -> list[dict]:
+    """The liveness assessment over every REGISTERED market, read under
+    DATA_DIR (so tests can seed a tmp tree) — the registry's own paths are
+    absolute and bound to the real Data/ at import time."""
+    from .markets import MARKETS
+    views = [SimpleNamespace(slug=s, receipts_path=DATA_DIR / s / "receipts.jsonl",
+                             prices_path=DATA_DIR / s / "prices.json",
+                             ots_dir=DATA_DIR / s / "ots") for s in MARKETS]
+    return assess(views, now)
+
+
+def build_digest(now: datetime | None = None) -> tuple[str, str] | None:
     """(subject, body) for the daily inbox digest — same numbers and house
     rules as the cloud routine: lead with the outcome, never soften the math,
     no superiority claims below the pre-registered bar."""
@@ -112,11 +126,26 @@ def build_digest() -> tuple[str, str] | None:
             f"{prime['tb2_spread']:.0f} EUR (7d mean "
             f"{statistics.fmean(e['tb2_spread'] for e in week):.0f})")
 
+    # Pillar B in the inbox (2026-10-01): the server tick's liveness alert went
+    # only to an ntfy phone push (ephemeral, unaudited), so IT/PT/FR stalled for
+    # 33 days while every digest kept printing their last settled line unchanged.
+    # The SAME assessment the CLI runs now heads the ALERTS line and flips the
+    # subject — durable, read daily, visible to the auditors. Reads DATA_DIR
+    # (the test seam) for every REGISTERED market.
+    dark = [r for r in _liveness_rows(now or datetime.now(timezone.utc))
+            if r["state"] == "STALE"]
     alerts = []
+    if dark:
+        alerts.append("LIVENESS STALE: " + ", ".join(r["slug"] for r in dark)
+                      + " (a registered market has gone dark — see below)")
     if losing_today:
         alerts.append("losing day in latest settlement (data, not a bug)")
     if crosscheck:
         alerts.append("CROSSCHECK-ALERTS.log present — price routes disagreed")
+    if dark:
+        lines.append("")
+        lines.append("Liveness (scripts/check_liveness.py):")
+        lines.extend(describe(r) for r in dark)
     if alerts:
         lines.insert(0, "ALERTS: " + "; ".join(alerts))
         lines.insert(1, "")

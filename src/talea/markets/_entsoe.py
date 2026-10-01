@@ -33,10 +33,21 @@ API = "https://web-api.tp.entsoe.eu/api"
 ATTRIBUTION = "ENTSO-E Transparency Platform (private use; prices not redistributed)"
 
 
+# The repo-root .env (gitignored, chmod 600 on the server) — the fallback when
+# ENTSOE_TOKEN is not exported in the process environment (it never is under the
+# systemd tick; the shell's `_env` reads the same file). Anchored on the REPO
+# ROOT (src/talea/markets/_entsoe.py -> parents[3]), and pinned by
+# tests/test_entsoe_token.py. The original `fetch_entsoe.py` lived one level up,
+# where `parents[2]` WAS the repo root; the 2026-08-28 copy into markets/ kept
+# the depth-relative lookup, which silently became src/.env — every IT/PT/FR
+# fetch then failed "ENTSOE_TOKEN not set" for 33 days (incident 2026-10-01).
+ENV_FILE = Path(__file__).resolve().parents[3] / ".env"
+
+
 def _token() -> str:
     t = os.getenv("ENTSOE_TOKEN")
     if not t:
-        envf = Path(__file__).resolve().parents[2] / ".env"
+        envf = ENV_FILE
         if envf.exists():
             for line in envf.read_text().splitlines():
                 if line.startswith("ENTSOE_TOKEN="):

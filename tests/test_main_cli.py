@@ -253,3 +253,55 @@ def test_markets_command_all(monkeypatch, capsys):
     monkeypatch.setattr(cli.sys, "argv", ["esios-paper", "markets"])
     assert cli.main() == 0
     assert capsys.readouterr().out.strip() == "es de it pt fr gb jp ercot"
+
+
+# ---- Pillar B in the digest (incident 2026-10-01) -----------------------------
+
+def _dark_market(tmp_path, slug, days_dark):
+    """A registered market whose newest price and newest receipt are `days_dark`
+    days old — exactly how IT/PT/FR looked for 33 days."""
+    from datetime import datetime, timedelta, timezone
+    d = tmp_path / slug
+    d.mkdir()
+    then = datetime(2026, 10, 1, 12, tzinfo=timezone.utc) - timedelta(days=days_dark)
+    d.joinpath("prices.json").write_text(json.dumps(
+        [{"ts": then.strftime("%Y-%m-%dT%H"), "price": 50.0}]))
+    d.joinpath("receipts.jsonl").write_text(json.dumps(
+        {"target": "x", "committed_at": then.isoformat()}) + "\n")
+
+
+def test_build_digest_flags_a_dark_registered_market(monkeypatch, tmp_path):
+    """The bug class: a shadow with a broken fetch kept its last settled line in
+    every digest, unchanged, with no alert — the only liveness signal was an
+    ephemeral phone push. Now the SAME check the server CLI runs heads ALERTS."""
+    from datetime import datetime, timezone
+    _seed(monkeypatch, tmp_path, ledger=[
+        {"target": "2026-09-30", "strategy": loop.STRATEGY, "strategy_version": V,
+         "pnl_eur": 10.0, "capture": 0.9, "tau": 0.9}])
+    _dark_market(tmp_path, "it", days_dark=33)
+    _dark_market(tmp_path, "de", days_dark=0)          # healthy control
+    now = datetime(2026, 10, 1, 15, tzinfo=timezone.utc)
+    subject, body = cli.build_digest(now=now)
+    assert subject.startswith("ALERT")
+    assert body.startswith("ALERTS: LIVENESS STALE: it (")
+    assert "de" not in body.split("\n")[0]              # healthy market not named
+    assert "STALE    it" in body and "33d stale" in body
+
+
+def test_build_digest_no_liveness_alert_when_all_live_or_onboarding(monkeypatch, tmp_path):
+    from datetime import datetime, timezone
+    _seed(monkeypatch, tmp_path, ledger=[
+        {"target": "2026-09-30", "strategy": loop.STRATEGY, "strategy_version": V,
+         "pnl_eur": 10.0, "capture": 0.9, "tau": 0.9}])
+    _dark_market(tmp_path, "de", days_dark=1)           # live; others NEVER (no files)
+    subject, body = cli.build_digest(now=datetime(2026, 10, 1, 15, tzinfo=timezone.utc))
+    assert not subject.startswith("ALERT") and "LIVENESS" not in body
+
+
+def test_liveness_rows_cover_every_registered_market(monkeypatch, tmp_path):
+    from datetime import datetime, timezone
+    from talea.markets import MARKETS
+    monkeypatch.setattr(cli, "DATA_DIR", tmp_path)
+    rows = cli._liveness_rows(datetime(2026, 10, 1, tzinfo=timezone.utc))
+    assert [r["slug"] for r in rows] == list(MARKETS)
+    assert {r["state"] for r in rows} == {"NEVER"}      # empty tree: nothing stale
