@@ -1,7 +1,9 @@
 # Data licence — Great Britain (GB)
 
-Price data in this directory is GB day-ahead **Market Index** price, sourced from
-**Elexon** via the **BMRS Insights** open-data API (provider APXMIDP).
+Price data in this directory is the Elexon **Market Index** price (provider
+APXMIDP) — a traded within-day reference index that populates through the
+delivery day, not the GB day-ahead auction clearing price (see VERIFY.md) —
+sourced from **Elexon** via the **BMRS Insights** open-data API.
 
 - Source: https://www.elexon.co.uk/ · https://bmrs.elexon.co.uk/ ·
   https://data.elexon.co.uk/

@@ -380,3 +380,36 @@ def test_day_card_skipped_when_an_hour_is_missing(monkeypatch, tmp_path):
     (d / "prices.json").write_text(json.dumps(rows))
     html = rd.build("es")
     assert '"target": "2026-08-13"' not in html      # incomplete curve -> skipped
+
+
+def test_signed_never_prints_plus_minus():
+    assert rd.signed(1234.5) == "+1,234.50"
+    assert rd.signed(0.0) == "+0.00"
+    assert rd.signed(-18.81) == "−18.81"
+    assert rd.sign_cls(-0.01) == "neg" and rd.sign_cls(0.0) == "pos"
+
+
+def test_losing_shadow_day_renders_minus_not_plus_minus(monkeypatch, tmp_path):
+    """Independent-audit observation (2026-10-05): gb.html showed a losing
+    shadow day as '+-18.81 £' because the strategy-panel cell hard-coded '+'
+    before fmt(). Exact GB shape: shadow-only page, one losing weekly day."""
+    receipts = [_receipt("2026-09-01", "2026-08-31", s) for s in (C, W)]
+    ledger = [_settle("2026-09-01", C, 240.51, 243.19, 0.989),
+              _settle("2026-09-01", W, -18.81, 243.19, -0.077)]
+    _seed(monkeypatch, tmp_path, "gb", ["2026-08-31", "2026-09-01"], ledger, receipts)
+    html = rd.build("gb")
+    assert "+-" not in html
+    assert "−18.81" in html and "+240.51" in html
+
+
+def test_losing_primary_day_and_total_are_signed_and_red(monkeypatch, tmp_path):
+    """Same class on the full page: the primary ledger row and the net-P&L tile
+    also hard-coded '+' and class 'pos'. A net-negative primary must render
+    '−' with the 'neg' class, never '+-' in green."""
+    ledger = [_settle("2026-08-13", P, -42.10, 151.82, -0.277)]
+    receipts = [_receipt("2026-08-13", "2026-08-12", P)]
+    _seed(monkeypatch, tmp_path, "es", ["2026-08-12", "2026-08-13"], ledger, receipts)
+    html = rd.build("es")
+    assert "+-" not in html
+    assert '<div class="v neg">−42.10' in html          # net P&L tile
+    assert '<td class="neg">−42.10</td>' in html        # primary ledger row

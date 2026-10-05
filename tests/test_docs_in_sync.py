@@ -277,3 +277,16 @@ def test_published_mirror_files_do_not_name_the_dead_repo():
         txt = (ROOT / rel).read_text()
         assert "spain-dayahead-ledger" not in txt, \
             f"{rel} names the dead repo 'spain-dayahead-ledger' (renamed to talea)"
+
+
+def test_gb_licence_does_not_call_the_market_index_day_ahead():
+    """Independent-audit observation (2026-10-05): Data/gb/LICENSE.md described
+    the feed as the 'GB day-ahead Market Index price', contradicting VERIFY.md
+    and the page banner (2026-09-07 finding F2: the Elexon Market Index is a
+    traded WITHIN-DAY index, not the day-ahead auction). The licence file ships
+    on the public mirror next to the data, so its description of the data must
+    match the disclosed truth."""
+    lic = (ROOT / "Data" / "gb" / "LICENSE.md").read_text()
+    flat = " ".join(lic.split())
+    assert "day-ahead Market Index" not in flat
+    assert "within-day" in flat

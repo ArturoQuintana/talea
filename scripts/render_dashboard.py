@@ -94,6 +94,18 @@ def fmt(x: float) -> str:
     return f"{x:,.2f}"
 
 
+def signed(x: float) -> str:
+    """P&L with an explicit sign: '+1,234.50' / '−18.81' (U+2212, as the
+    client-side day chips render it). Never '+-18.81' — a hard-coded '+' in
+    front of fmt() printed exactly that on GB's losing shadow days
+    (independent-audit observation, 2026-10-05)."""
+    return f"+{fmt(x)}" if x >= 0 else f"\u2212{fmt(-x)}"
+
+
+def sign_cls(x: float) -> str:
+    return "pos" if x >= 0 else "neg"
+
+
 # Shared design tokens for the landing index and the awaiting-market pages (the
 # full per-market TEMPLATE carries its own copy). These f-string-embedded blocks
 # are NOT %-formatted, so literal % needs no escaping.
@@ -262,7 +274,7 @@ def _h2h(ledger: list[dict], missed: list[str], cur: str):
                        if e.get("capture") is not None else "n/a")
                 tau = (f" · tau {e['tau']:.3f}"
                        if e.get("tau") is not None else "")
-                cells.append(f"<td>+{fmt(e['pnl_eur'])}&thinsp;{cur} ({cap}{tau})"
+                cells.append(f"<td>{signed(e['pnl_eur'])}&thinsp;{cur} ({cap}{tau})"
                              "</td>")
         rows.append(f'<tr><td class="k">{t}</td>{"".join(cells)}</tr>')
     pair_notes = []
@@ -392,7 +404,7 @@ def build(slug: str = "es") -> str:
             f"<td>{fmt(buy_avg)}</td>"
             f'<td>{", ".join(f"{h:02d}" for h in e["sell_hours"])}</td>'
             f"<td>{fmt(sell_avg)}</td>"
-            f'<td class="pos">+{fmt(e["pnl_eur"])}</td>'
+            f'<td class="{sign_cls(e["pnl_eur"])}">{signed(e["pnl_eur"])}</td>'
             f"<td>{fmt(e['oracle_pnl_eur'])}</td><td>{cap}</td></tr>")
     for m in missed:
         ledger_rows.append(
@@ -441,7 +453,8 @@ def build(slug: str = "es") -> str:
         "publication": _publication(cfg),
         "disclosure": _disclosure(cfg),
         "asof": now.strftime(f"%Y-%m-%d %H:%M {cfg['tzlabel']}"),
-        "total": fmt(total), "oracle_total": fmt(oracle_total),
+        "total": signed(total), "total_cls": sign_cls(total),
+        "oracle_total": fmt(oracle_total),
         "cap_mean": f"{cap_mean:.1f}", "wins": wins, "n": len(prim),
         "missed_n": len(missed),
         "gate_tile": gate_tile, "gate_section": gate_section,
@@ -486,6 +499,7 @@ TEMPLATE = """<title>%(tabtitle)s</title>
   .tile .k { font:600 10.5px/1 var(--mono); letter-spacing:.12em; text-transform:uppercase; color:var(--muted); }
   .tile .v { font:600 27px/1.15 var(--sans); margin-top:7px; }
   .tile .v.pos { color:var(--good); }
+  .tile .v.neg { color:var(--bad); }
   .tile .s { color:var(--ink2); font-size:12.5px; margin-top:3px; }
   .day { background:var(--card); border:1px solid var(--border); border-radius:6px;
     padding:18px 18px 12px; margin-bottom:16px; }
@@ -532,6 +546,7 @@ TEMPLATE = """<title>%(tabtitle)s</title>
   td { font-family:var(--mono); font-size:12.5px; font-variant-numeric:tabular-nums; color:var(--ink2); }
   td.k { color:var(--ink); }
   td.pos { color:var(--good); }
+  td.neg { color:var(--bad); }
   tfoot td { border-top:2px solid var(--axis); font-weight:600; color:var(--ink); }
   footer { margin-top:44px; color:var(--muted); font-size:12.5px; line-height:1.7; }
   footer .m { font-family:var(--mono); font-size:11.5px; }
@@ -549,7 +564,7 @@ TEMPLATE = """<title>%(tabtitle)s</title>
 
   <div class="tiles">
     <div class="tile"><div class="k">Net P&amp;L · paper</div>
-      <div class="v pos">+%(total)s&thinsp;%(cur)s</div>
+      <div class="v %(total_cls)s">%(total)s&thinsp;%(cur)s</div>
       <div class="s">of %(oracle_total)s&thinsp;%(cur)s oracle ceiling</div></div>
     <div class="tile"><div class="k">Mean capture</div>
       <div class="v">%(cap_mean)s%%</div>
