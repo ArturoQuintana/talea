@@ -1,0 +1,3 @@
+esios-paper audit manifest 2026-11-07
+sha256(receipts.jsonl)=885c1f7eaf1bcd3a2e6ac2915bfd2173633a92bcd73ea9cce7fa3433bb00a886
+sha256(ledger.jsonl)=523b13e60053e81f748ac379133c1176ba03e23fcd6d13025a43ada96d16f114
