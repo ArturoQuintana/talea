@@ -101,7 +101,7 @@
     <h1>ERCOT (HB_NORTH) day-ahead battery arbitrage</h1>
     <p class="asof">1 MW / 2 MWh virtual battery · decisions committed before price publication
       (leak-guarded, OpenTimestamps-stamped &mdash; Bitcoin&#8209;confirmed within days) ·
-      data as of <code>2026-11-11 00:03 Chicago</code> · generated from the audit files, no hand-edited numbers</p>
+      data as of <code>2026-11-11 04:01 Chicago</code> · generated from the audit files, no hand-edited numbers</p>
   </header>
   
 
@@ -308,7 +308,10 @@
       until a block lands; see VERIFY.md for per-date confirmed/pending status);
       prices: ERCOT public data (NP4-190, DAM SPP).
       Absolute USD is an <b>upper bound</b> (exchange fees only — no grid
-      charges, taxes, or aggregator margin); relative metrics are robust.
+      charges, taxes, or aggregator margin); relative metrics are robust to
+      that. A larger caveat: the P&amp;L does <b>not enforce dispatch order</b> —
+      sell hours can precede buy hours, which an empty battery cannot run, and
+      strategy comparisons are not robust to it (VERIFY.md, section 4).
       Verify everything yourself: see VERIFY.md in this repository.</p>
   </footer>
 </div>

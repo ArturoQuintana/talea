@@ -115,6 +115,10 @@ def describe(r: dict) -> str:
         return (f"  STALE    {r['slug']:6} — never stored a price despite ticking "
                 f"(fetch refused since launch?)")
     if r.get("fetch_stale"):
+        # Not "fetcher stopped": on 2026-11-04..10 the fetchers were fine and the
+        # server's clone had stopped pulling, and that wording sent the reader
+        # looking in the wrong place for a week.
         return (f"  STALE    {r['slug']:6} — prices {r['price_age_d']}d stale "
-                f"(fetcher stopped)")
+                f"(no new prices are arriving here: its writer stopped, or this "
+                f"checkout is not pulling — check `git status`)")
     return f"  {r['state']:8} {r['slug']:6} — last commit {r['age_h']:.1f}h ago"

@@ -28,11 +28,54 @@ before the data that would trigger them.
    out-of-sample (≥1-year temporal backtest) AND on ≥30 shared live shadow
    days → "our forecast adds sellable value" is falsified.
 
+Scope (Amendment 1, below): these three are criteria of the project's premise
+and apply to Spain, the primary market. In any other market, condition 2 has
+that market's own consequence: no new strategy or escalation there until the
+cause is diagnosed and written up.
+
 ## Deciding strategy comparisons
 
-"A beats B" requires, over SHARED settled days: ≥30 non-tied days AND
-one-sided sign test p < 0.05 on paired daily P&L deltas (ties |Δ| < 0.01
-EUR excluded). Below that bar, no superiority claims — anywhere.
+"A beats B" is decided by a one-sided sign test on paired daily P&L deltas
+over SHARED settled days. Deltas are rounded to cents; |Δ| < 0.01 is a tie and
+is excluded. Below the bar, no superiority claims — anywhere.
+
+**The p-value** (ratified by the owner 2026-08-27, before any comparison had
+30 days). `p_eff = max(p_iid, p_boot)`: the plain sign-test p, floored against
+a moving-block-bootstrap p that allows for days not being independent. `p_boot`
+is read from a table frozen on 2026-08-27 and published with the data,
+`Data/calibration/sign_bar.json` (SHA-256
+`024cca63c588211f5547d81e7d9ae27f2753e9dec4135ec1729b4bb68dd04044`). It covers
+30 to 90 non-tied days; beyond 90 the plain sign test applies. Taking the
+larger of the two means the table can only make the bar harder.
+
+**Amendment 1** (ratified by the owner in writing 2026-11-10; in force for data
+settled after 2026-11-11T03:30:00Z). It fixes when a comparison is decided and
+what it is corrected for:
+
+1. **One confirmatory comparison:** climatology vs persistence in Spain,
+   registered 2026-08-01. It is decided once, on exactly its first 90 non-tied
+   shared days since 2026-08-01, at 0.05. The verdict is final and is published
+   either way.
+2. **Every other comparison is exploratory.** It counts only days settled after
+   the amendment, needs at least 30 non-tied days, and is decided only at a
+   month-end review, at a threshold of 0.05/12 per review, Holm-corrected
+   within its market. A market's family is each "shadow beats the primary" and
+   each comparison a retirement needs, where its precondition is met.
+3. **Between reviews** tools and digests show wins, ties and losses. They show
+   no p-value and no verdict.
+4. **Promotion** of a shadow to primary also needs its pooled capture (sum of
+   P&L over sum of oracle P&L, over the comparison's days) to be at least the
+   primary's. **Retirement** of a shadow needs it to lose both to the primary
+   and to another shadow, each on at least 60 shared and 30 non-tied days.
+   Both run per market, against that market's own primary; a market whose
+   primary does not commit receipts has no evaluation.
+5. **Forward only.** Nothing settled before the amendment decides an
+   exploratory comparison, whatever it shows.
+
+Every verdict is recomputed by the statistical referee (below) before it is
+acted on or published. To reproduce: `python scripts/compare_strategies.py`
+prints the counts; with `--decision-look` it prints `p_eff`, each market's
+family and the thresholds, as a month-end review sees them.
 
 ## Independent verification roles
 

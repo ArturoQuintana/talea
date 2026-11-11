@@ -5,7 +5,19 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 export PATH="$HOME/.local/bin:$PATH"
-git pull --ff-only || echo "[talea] pre-tick pull failed (continuing on local state)"
+# ff-only first; if local history has DIVERGED (an earlier push was rejected
+# while ERCOT/JP Actions pushed to main), rebase our unpushed Data commits onto
+# origin rather than staying stuck forever (incident 2026-11-03..09: a bare
+# --ff-only failed every tick for 6 days; ES/DE/GB never reached origin and
+# ERCOT never reached the mirror). Writers own disjoint Data/<slug>/ paths; on
+# any conflict the rebase is aborted and the tick continues on local state.
+# Never a force-push; published history is never rewritten. Deliberately NOT
+# --autostash: on a dirty tree it can exit 0 with conflict markers left in a
+# data file (which `git add Data` would then commit) — a dirty tree makes the
+# rebase refuse instead, and git_backup retries once the tick has committed.
+git pull --ff-only \
+  || git pull --rebase \
+  || { git rebase --abort 2>/dev/null; echo "[talea] pre-tick pull failed (continuing on local state)"; }
 # Silent shadow markets FIRST (best-effort, never affect the ES tick): their
 # Data/<slug>/ changes ride the ES tick's git_backup. They DO OTS-anchor (each
 # gets its own Data/<slug>/ots Bitcoin proof — see cmd_tick + the test
@@ -24,14 +36,16 @@ for m in $(uv run --no-dev python -m talea markets --driver server); do
 done
 uv run --no-dev python -m talea tick          # ES: commits Data/ (all markets)
 rc=$?
-# Pillar B — liveness monitor (2026-08-28): page if any REGISTERED market has
+# Pillar B — liveness monitor (2026-08-28): flag if any REGISTERED market has
 # silently stopped committing (>48h since its last receipt) — the one harm
 # verify_ledger cannot see (a dark market writes nothing to verify). Runs after
 # all ticks so it sees the freshest state; best-effort, never affects the tick exit.
 if ! LIVENESS=$(uv run --no-dev python scripts/check_liveness.py --quiet 2>&1); then
+  # Journal only. The operator is told by EMAIL: the daily digest's ALERTS line
+  # carries this same assessment. The ntfy phone push that used to be sent here
+  # was retired 2026-11-11 (it reached the app but the phone never notified;
+  # docs/incidents.md, register D-17).
   echo "[talea] LIVENESS ALERT:"; echo "$LIVENESS"
-  curl -s -m 20 -H 'Title: esios LIVENESS' -H 'Priority: high' -H 'Tags: rotating_light' \
-    -d "a market has gone dark: $LIVENESS" https://ntfy.sh/esios-2b32d5ab08012283 || true
 fi
 scripts/publish_mirror.sh || echo "[talea] mirror publish failed (non-fatal)"
 exit $rc

@@ -37,6 +37,7 @@ CUR_SYMBOL = {"EUR": "€", "GBP": "£", "USD": "$", "JPY": "¥"}
 sys.path.insert(0, str(ROOT / "src"))
 from talea.markets import (   # noqa: E402
     MARKETS as _REGISTRY, public_markets as _public_markets)
+from talea.liveness import market_liveness as _market_liveness  # noqa: E402
 
 
 def _presentation_config() -> dict[str, dict]:
@@ -46,7 +47,7 @@ def _presentation_config() -> dict[str, dict]:
         if not p.title:
             continue
         out[slug] = {"data": m.prices_path.parent, "title": p.title,
-                     "tzlabel": p.tz_label, "gate": p.show_gate,
+                     "tzlabel": p.tz_label, "tz": m.tz, "gate": p.show_gate,
                      "source": p.source, "tab": p.tab_name,
                      "currency": m.currency,
                      "publication": p.publication, "note": p.note}
@@ -74,6 +75,43 @@ def _disclosure(cfg: dict) -> str:
     if not note:
         return ""
     return (f'<div class="banner disclosure"><b>Disclosure.</b> {note}</div>')
+
+
+def _now() -> datetime:
+    """Page generation time (a seam so tests can pin the clock)."""
+    return datetime.now(ZoneInfo("Europe/Madrid"))
+
+
+def _stale_banner(cfg: dict, now: datetime) -> str:
+    """A STALE-DATA banner when this market's audit files have stopped advancing
+    (newest price older than liveness.PRICE_STALE_DAYS, or no receipt committed
+    in liveness.STALE_HOURS) — the SAME rule the liveness monitor pages on.
+
+    Independent-audit finding (2026-11-09, ERCOT): the page header said "data as
+    of 2026-11-08" while its data stopped at 2026-11-03 and the 11-04 receipts
+    sat as "Pending" five days past target, with no note — a reader would think
+    the market was live. The "as of" stamp is the RENDER time, so a dark market
+    must say so on the page itself. Empty when the market is healthy."""
+    data = cfg["data"]
+    lv = _market_liveness("", data / "receipts.jsonl",
+                          now.astimezone(timezone.utc),
+                          prices_path=data / "prices.json")
+    if lv["state"] != "STALE":
+        return ""
+    bits = []
+    if lv.get("price_age_d") is not None:
+        newest = (now.date() - timedelta(days=lv["price_age_d"])).isoformat()
+        bits.append(f"the newest price in this ledger is for <code>{newest}</code> "
+                    f"({lv['price_age_d']} days before this page was generated)")
+    if lv.get("last_commit") is not None:
+        bits.append("the newest receipt was committed "
+                    f"<code>{lv['last_commit'].astimezone(timezone.utc):%Y-%m-%d %H:%M} UTC</code>")
+    detail = " and ".join(bits) or "no recent data has reached it"
+    return ('<div class="banner disclosure stale"><b>Stale data — this market\'s '
+            'page is not current.</b> The page was regenerated recently, but '
+            f'{detail}. Updates have stopped reaching this page; open receipts '
+            'shown as pending are not settling here. Treat every figure as of '
+            'that date until this notice clears.</div>')
 
 
 def jsonl(p: Path) -> list[dict]:
@@ -198,7 +236,7 @@ def _page_head(slug: str, cfg: dict, now: datetime) -> str:
       before price publication (leak-guarded, OpenTimestamps-stamped —
       Bitcoin&#8209;confirmed within days) · as of <code>{asof}</code></p>
   </header>
-  {_disclosure(cfg)}"""
+  {_stale_banner(cfg, now)}{_disclosure(cfg)}"""
 
 
 def _light_footer(cfg: dict) -> str:
@@ -339,14 +377,17 @@ def _shadow_only(slug: str, cfg: dict, receipts: list[dict], ledger: list[dict],
 {_light_footer(cfg)}"""
 
 
-def build(slug: str = "es") -> str:
+def build(slug: str = "es", now: datetime | None = None) -> str:
     cfg = MARKETS[slug]
     DATA = cfg["data"]
     cur = CUR_SYMBOL.get(cfg["currency"], cfg["currency"])
     curcode = cfg["currency"]
     ledger = jsonl(DATA / "ledger.jsonl")
     receipts = jsonl(DATA / "receipts.jsonl")
-    now = datetime.now(ZoneInfo("Europe/Madrid"))
+    # The "as of" stamp is printed with the MARKET's city label, so it must be
+    # the market's own wall clock — not Madrid's for every page (audit finding
+    # 2026-11-02: gb.html read 1h ahead of London, ercot.html 7h ahead of Chicago).
+    now = (now or _now()).astimezone(cfg["tz"])
 
     prim = [e for e in ledger if e["strategy"] == PRIMARY]
     if not ledger:
@@ -451,7 +492,7 @@ def build(slug: str = "es") -> str:
         "cur": cur, "curcode": curcode,
         "source": cfg.get("source", "apidatos.ree.es"),
         "publication": _publication(cfg),
-        "disclosure": _disclosure(cfg),
+        "disclosure": _stale_banner(cfg, now) + _disclosure(cfg),
         "asof": now.strftime(f"%Y-%m-%d %H:%M {cfg['tzlabel']}"),
         "total": signed(total), "total_cls": sign_cls(total),
         "oracle_total": fmt(oracle_total),
@@ -615,7 +656,10 @@ TEMPLATE = """<title>%(tabtitle)s</title>
       until a block lands; see VERIFY.md for per-date confirmed/pending status);
       prices: %(source)s.
       Absolute %(curcode)s is an <b>upper bound</b> (exchange fees only — no grid
-      charges, taxes, or aggregator margin); relative metrics are robust.
+      charges, taxes, or aggregator margin); relative metrics are robust to
+      that. A larger caveat: the P&amp;L does <b>not enforce dispatch order</b> —
+      sell hours can precede buy hours, which an empty battery cannot run, and
+      strategy comparisons are not robust to it (VERIFY.md, section 4).
       Verify everything yourself: see VERIFY.md in this repository.</p>
   </footer>
 </div>

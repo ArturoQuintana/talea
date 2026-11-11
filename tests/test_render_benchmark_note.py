@@ -1,16 +1,16 @@
 """Tests for the weekly benchmark-note renderer.
 
-The load-bearing guarantee: the note can NEVER print a superiority claim below
-the pre-registered bar. That is enforced by comparison_line reusing the Option C
-panel verdict AND additionally gating on pooled capture — so the tests exercise
-(a) the no-bar-met wording, (b) a genuine bar-met, and critically (c) a
-sign-significant-but-capture-failing strategy, which must NOT be called a winner.
+The load-bearing guarantee: the note can NEVER print a superiority claim. Since
+Amendment 1 (ratified 2026-11-10) a comparison is decided only at a month-end
+review, and a weekly note is never one — so comparison_line reports wins, ties
+and losses and nothing else. The tests assert the counts, and that no p-value
+or verdict appears however decisive the data.
 """
 from __future__ import annotations
 
 import json
 import sys
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -21,6 +21,7 @@ import render_benchmark_note as r  # noqa: E402
 
 PERS = "battery-2h2h-persistence"
 CLIM = "battery-2h2h-climatology"
+RANK = "battery-2h2h-rankblend"
 CAL_ON = {"valid": True, "survival": {}}   # calibrated regime, no survival table
 
 
@@ -119,38 +120,38 @@ def test_market_section_usd_header(tmp_path):
 
 # --- the standing line: the anti-over-claim guarantee ---
 
-def test_comparison_line_no_bar_met_wording():
+def test_comparison_line_reports_counts_and_never_a_verdict():
     rows = []
-    for i in range(5):                       # only 5 days -> ineligible (n<30)
+    for i in range(5):
         t = f"2026-08-0{i + 1}"
         rows.append(_row(t, PERS, 100.0, oracle=200.0))
         rows.append(_row(t, CLIM, 110.0 if i < 3 else 90.0, oracle=200.0))
     line = r.comparison_line(rows, CAL_ON)
-    assert line.startswith("No strategy has met the pre-registered bar")
-    assert "confirmatory comparison: 5 shared non-tied days" in line
+    assert line.startswith("Standing is decided only at month-end reviews")
+    assert "3 wins, 2 losses, 0 ties — 5 of 90." in line
+    assert "since the rules were amended" not in line      # nothing settled since
 
 
-def test_comparison_line_bar_met_when_significant_and_capture_wins():
+def test_comparison_line_cannot_declare_a_winner_however_decisive_the_data():
+    """Amendment 1, clause 4: no p-value and no verdict outside a month-end
+    review. A weekly note is never one. 95 straight climatology wins, and 40
+    straight rankblend wins settled after the amendment, still yield counts."""
     rows = []
-    for i in range(35):                      # 35 days, climatology wins every day
-        t = f"2026-08-{i + 1:02d}"
-        rows.append(_row(t, PERS, 100.0, oracle=200.0))    # capture 0.50
-        rows.append(_row(t, CLIM, 150.0, oracle=200.0))    # capture 0.75, +50/day
-    line = r.comparison_line(rows, CAL_ON)
-    assert "has met the full pre-registered bar" in line
-    assert "climatology" in line and "capture 75.0% vs 50.0%" in line
-
-
-def test_comparison_line_capture_guard_blocks_significant_but_lower_capture():
-    # Climatology WINS the sign test (25 tiny wins vs 5 big losses) but its pooled
-    # capture is far BELOW persistence — the note must NOT call it a winner.
-    rows = []
-    for i in range(30):
-        t = f"2026-08-{i + 1:02d}"
+    for i in range(95):
+        t = (date(2026, 8, 1) + timedelta(days=i)).isoformat()
         rows.append(_row(t, PERS, 100.0, oracle=200.0))
-        rows.append(_row(t, CLIM, 100.01 if i < 25 else -900.0, oracle=200.0))
-    line = r.comparison_line(rows, CAL_ON)
-    assert line.startswith("No strategy has met the pre-registered bar")
+        rows.append(_row(t, CLIM, 150.0, oracle=200.0))
+    for i in range(40):
+        t = (date(2026, 11, 12) + timedelta(days=i)).isoformat()
+        for strat, pnl in ((PERS, 100.0), (RANK, 150.0)):
+            rows.append({**_row(t, strat, pnl, oracle=200.0),
+                         "settled_at": "2026-12-25T16:00:00+00:00"})
+    line = r.comparison_line(rows)
+    # the confirmatory comparison is fixed on its first 90 non-tied days
+    assert "90 wins, 0 losses, 0 ties — 90 of 90." in line
+    assert "rankblend 40W-0T-0L" in line
+    for forbidden in ("p_eff", "p =", "has met", "beats", "BAR MET", "significant"):
+        assert forbidden not in line, forbidden
 
 
 # --- whole note + CLI ---
@@ -170,7 +171,8 @@ def test_render_note_contains_fixed_sections_and_standing(tmp_path, monkeypatch)
     assert "example.test/ledger" in note            # mirror url threaded
     assert "verify_ledger.py --all" in note         # verify block
     assert "no capital at risk" in note             # method footer
-    assert "No strategy has met the pre-registered bar" in note
+    assert "Standing is decided only at month-end reviews" in note
+    assert "at 0.05/12 per review" in note          # the amended bar box
 
 
 def test_render_note_footnotes_public_market_with_no_settled_days(tmp_path, monkeypatch):

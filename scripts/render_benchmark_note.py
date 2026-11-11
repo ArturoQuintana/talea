@@ -116,31 +116,30 @@ def render_market_section(market, week_end: date, window_days: int) -> tuple[str
     return "\n".join(lines) + "\n", n_days
 
 
-def comparison_line(all_settled: list[dict], cal: dict | None) -> str:
-    """The 'standing vs the baseline' line, GENERATED from the panel verdict.
-    A 'beats' statement requires the full R1 bar: sign-test significant AND pooled
-    capture >= the baseline's. Otherwise it states plainly that no bar is met."""
-    v = cmp.panel_verdict(all_settled, cal)
-    beaters, conf = [], None
-    for r in v["comparisons"]:
-        pa, pb = r.get("pooled_capture_a"), r.get("pooled_capture_b")
-        if r["significant"] and pa is not None and pb is not None and pa >= pb:
-            beaters.append(r)
-        if r["confirmatory"]:
-            conf = r
-    if beaters:
-        parts = [f"{NAMES.get(r['strategy'], r['strategy'])} ({r['n']} shared "
-                 f"non-tied days, p_eff = {r['p_eff']:.4f}, capture "
-                 f"{r['pooled_capture_a'] * 100:.1f}% vs {r['pooled_capture_b'] * 100:.1f}%)"
-                 for r in beaters]
-        return ("The following has met the full pre-registered bar vs the "
-                "persistence baseline: " + "; ".join(parts) + ".")
-    tail = ""
-    if conf and conf["n"] > 0:
-        tail = (f" (climatology, the confirmatory comparison: {conf['n']} shared "
-                f"non-tied days, sign-test p_eff = {conf['p_eff']:.2f}).")
-    return ("No strategy has met the pre-registered bar to be declared better than "
-            "the persistence baseline; differences are within noise." + tail)
+def comparison_line(all_settled: list[dict], cal: dict | None = None) -> str:
+    """The 'standing vs the baseline' line. COUNTS ONLY, by construction.
+    Under Amendment 1 (ratified 2026-11-10) a comparison is decided only at a
+    month-end review; between reviews nothing may show a p-value or a verdict.
+    A weekly note is never a decision look, so this line cannot declare a
+    winner — it reports wins, ties and losses and says where decisions are made.
+    `cal` is accepted for the old call signature and is not used."""
+    conf = cmp.confirmatory_look(all_settled, None)
+    parts = [
+        "Standing is decided only at month-end reviews, under the pre-registered "
+        "rules; this note reports counts, never a verdict.",
+        f"Climatology vs persistence (the one confirmatory comparison, decided once "
+        f"on its first {conf['target_n']} non-tied days): {conf['wins']} wins, "
+        f"{conf['losses']} losses, {conf['ties']} ties — "
+        f"{min(conf['n'], conf['target_n'])} of {conf['target_n']}."]
+    look = cmp.market_look(cmp.CONFIRMATORY["market"], all_settled, None,
+                           primary=cmp.PERSISTENCE)
+    since = [f"{NAMES.get(c['a'], c['a'])} {c['wins']}W-{c['ties']}T-{c['losses']}L"
+             for c in look["comparisons"]
+             if c["rule"] == "R1" and not c["confirmatory"] and c["shared"]]
+    if since:
+        parts.append("Against persistence, on days settled since the rules were "
+                     "amended (2026-11-11): " + "; ".join(since) + ".")
+    return " ".join(parts)
 
 
 # --- the note ---
@@ -153,11 +152,14 @@ STANDFIRST = (
     "below from the public audit files.*")
 
 BAR_BOX = (
-    "> *The bar (pre-registered):* a strategy is declared to beat the persistence "
-    "baseline only on ≥30 shared non-tied settled days with a one-sided "
-    "sign-test `p_eff < 0.05` (Option C: `p_eff = max(p_iid, p_boot)`, "
-    "Holm-corrected across the family) **and** capture ≥ the baseline's over "
-    "the shared window. Until then, differences are reported, never ranked.")
+    "> *The bar (pre-registered; amended 2026-11-10):* a strategy is declared to "
+    "beat the persistence baseline only at a month-end review, on ≥30 shared "
+    "non-tied days settled after 2026-11-11, with a one-sided sign-test `p_eff` "
+    "(`max(p_iid, p_boot)`) at 0.05/12 per review, Holm-corrected within the "
+    "market, **and** pooled capture ≥ the baseline's. The one confirmatory "
+    "comparison (climatology vs persistence, Spain) is decided once, on its first "
+    "90 non-tied days, at 0.05. Until a review decides, differences are reported, "
+    "never ranked.")
 
 METHOD = (
     "<sub>**Method.** Simulated 1 MW / 2 MWh unit, buy the 2 cheapest hours, sell "

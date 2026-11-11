@@ -94,6 +94,27 @@ def test_verify_discloses_migrated_market_evidence_boundaries():
          "'git-attested from their first tick'")
 
 
+def test_verify_discloses_the_2026_11_server_sync_outage_boundary():
+    """Incident 2026-11-09 (server clone diverged 2026-11-04 → 11-10): ERCOT's
+    receipts for targets 2026-11-05 → 11-11 reached the public mirror in ONE
+    late commit (7f05f41), after every one of those targets had published — the
+    same weak-check blind spot as the 2026-08-29 bulk imports, so VERIFY.md must
+    disclose it the same way (and say what DOES corroborate the window). Guards
+    the disclosure against being dropped in a future VERIFY rewrite."""
+    v = (ROOT / "VERIFY.md").read_text().lower()
+    ercot_bullet = v.split("- **ercot**", 1)[1].split("\n- **", 1)[0]
+    assert "7f05f41" in ercot_bullet and "2026-11-05" in ercot_bullet \
+        and "2026-11-11" in ercot_bullet, \
+        ("VERIFY.md's ERCOT bullet must disclose the 2026-11 outage boundary: "
+         "targets 2026-11-05 → 11-11 entered the mirror in the single late "
+         "commit 7f05f41")
+    assert "data/ercot/ots/2026-11-04" in ercot_bullet, \
+        "the disclosure must point at the on-time OTS manifests that cover the window"
+    assert "server-sync outage" in v.split("## 2.", 1)[0].split("## 1.", 1)[1], \
+        ("section 1 must state what the outage did to the weak check for ES/DE/GB "
+         "and to the private repo's commit times")
+
+
 def test_every_public_market_has_a_colocated_data_licence():
     """Licensing travels with the data: each PUBLISHED market carries its own
     Data/<slug>/LICENSE.md (source + licence + attribution) and is indexed in
@@ -219,6 +240,64 @@ def test_incident_escape_tally_matches_the_table():
         f"table has {escapes} escapes of {total} incidents — recount and update the line")
 
 
+def _alert_channel_rows(infra: str) -> list[list[str]]:
+    """The rows of INFRA.md's alert-channel table, as lists of cells."""
+    head = "### Alert channels"
+    assert head in infra, "INFRA.md must keep its 'Alert channels' table"
+    rows = []
+    for line in infra.split(head, 1)[1].splitlines():
+        if line.startswith("#"):
+            break
+        if line.startswith("|") and not line.startswith("|---") \
+                and not line.startswith("| Channel"):
+            rows.append([c.strip() for c in line.strip().strip("|").split("|")])
+    return rows
+
+
+def _alert_channel_problems(rows: list[list[str]], senders: dict[str, bool]) -> list[str]:
+    """What is wrong with the table: a row with no receipt status, or a channel
+    the code sends on that has no row. `senders` maps a word that must appear in
+    some row's channel cell to whether the code sends on that channel."""
+    status = re.compile(r"^(\d{4}-\d\d-\d\d|UNCONFIRMED|NOT RECEIVED|RETIRED)\b")
+    problems = [f"row {r[0]!r} does not say whether the operator confirmed it"
+                for r in rows if len(r) != 3 or not status.match(r[2])]
+    problems += [f"the code sends on {word!r} but the table has no row for it"
+                 for word, sends in senders.items()
+                 if sends and not any(word in r[0].lower() for r in rows)]
+    return problems
+
+
+def test_every_alert_channel_states_whether_the_operator_confirmed_it():
+    """Incident 2026-11-11: the ntfy phone push had never reached the operator.
+    It was the only liveness channel for five weeks and fired 21 times in one
+    week, and nothing noticed, because the send (`curl ... || true`) cannot fail
+    and nobody had ever checked the receiving end. A sender that runs is not a
+    channel that works. INFRA.md therefore lists every alert channel with the
+    date the operator last confirmed receiving one, or UNCONFIRMED, or NOT
+    RECEIVED, or RETIRED — and a channel the code sends on cannot be missing
+    from it. (The push itself was retired the same day; the routine briefs
+    still name it, so its row stays.)"""
+    tick = (ROOT / "scripts" / "server_tick.sh").read_text()
+    shell = (ROOT / "src" / "talea" / "__main__.py").read_text()
+    routines = "".join(p.read_text() for p in (ROOT / "docs" / "routines").glob("*.md"))
+    senders = {
+        "ntfy": "ntfy.sh" in tick or "ntfy.sh" in routines,
+        "heartbeat": "ESIOS_HEARTBEAT_URL" in shell,
+        "email": "smtplib" in shell,
+    }
+    assert any(senders.values()), "no sender found — has the alert code moved?"
+    rows = _alert_channel_rows(INFRA)
+    assert not _alert_channel_problems(rows, senders), _alert_channel_problems(rows, senders)
+
+    # the guard must be able to fail the way the real defect did
+    assert _alert_channel_problems([["ntfy phone push", "stale market", "sent on every tick"]],
+                                   {"ntfy": True})          # "sent" is not "received"
+    assert _alert_channel_problems([r for r in rows if "ntfy" not in r[0].lower()],
+                                   {"ntfy": True})          # a sender with no row
+    assert not _alert_channel_problems([["sms", "x", "UNCONFIRMED — never drilled"]],
+                                       {"ntfy": False})     # honest "unknown" passes
+
+
 def test_mirror_is_deny_by_default_allowlist():
     """Incident 2026-08-28: FR (private, derived-only) leaked to the PUBLIC mirror
     through a DENY-LIST gap — fr/ was never added to the excludes. The Talea mirror
@@ -266,6 +345,39 @@ def test_architecture_market_count_words_match_the_registry():
         f"{len(MARKETS)} — update every spelled-out count when a market is added")
 
 
+def test_public_governance_extract_states_the_bar_in_force():
+    """Found 2026-11-11: GOVERNANCE.md, the public extract VERIFY.md sends
+    readers to, still stated the comparison bar as "30 non-tied days and
+    p < 0.05" — the rule before Option C (2026-08-27) and Amendment 1
+    (2026-11-10). The published bar was easier than the bar in force, so an
+    outside reader could not check a verdict against it. The extract must carry
+    every number the comparison script applies; they are read from the script,
+    so changing a rule without updating the public page fails here."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "compare_strategies", ROOT / "scripts" / "compare_strategies.py")
+    cs = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cs)
+    gov = " ".join((ROOT / "GOVERNANCE.md").read_text().split())
+    needed = {
+        "the p-value definition": "p_eff = max(p_iid, p_boot)",
+        "the frozen table's hash": cs.CALIBRATION_SHA256,
+        "the amendment instant": cs.AMENDMENT_1_AT.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "the per-review threshold": "0.05/12",
+        "the precondition": f"at least {cs.N_MIN} non-tied days",
+        "R7's shared days": f"at least {cs.R7_SHARED_MIN} shared",
+        "the terminal look": f"first {cs.CONFIRMATORY['n']} non-tied shared days "
+                             f"since {cs.CONFIRMATORY['since']}",
+        "the terminal alpha": f"at {cs.CONFIRMATORY['alpha']}",
+        "counts only between reviews": "no p-value and no verdict",
+        "the non-ES consequence": "no new strategy or escalation there",
+    }
+    assert abs(cs.LOOK_ALPHA - 0.05 / 12) < 1e-15      # the page says 0.05/12
+    missing = [what for what, text in needed.items() if text not in gov]
+    assert not missing, f"GOVERNANCE.md does not state: {missing}"
+    assert "sign test p < 0.05 on paired" not in gov, "the pre-2026-08-27 bar is back"
+
+
 def test_published_mirror_files_do_not_name_the_dead_repo():
     """Audit finding D2 (2026-09-23): the workflow shipped to the public mirror
     (mirror/verify.yml) still introduced itself as running on
@@ -290,3 +402,76 @@ def test_gb_licence_does_not_call_the_market_index_day_ahead():
     flat = " ".join(lic.split())
     assert "day-ahead Market Index" not in flat
     assert "within-day" in flat
+
+
+def test_public_docs_disclose_that_pnl_does_not_enforce_dispatch_order():
+    """Red-team finding 2026-10-01, unanswered for six weeks: the P&L pairs a
+    day's sells with its buys regardless of order, so some booked days are
+    schedules a battery could not run — and VERIFY.md, the README and the page
+    footer all said relative metrics were 'robust'. They are robust to the fee
+    assumption only. All three must say so, and VERIFY.md must point at the
+    script that measures the effect."""
+    verify = (ROOT / "VERIFY.md").read_text()
+    readme = (ROOT / "README-public.md").read_text()
+    footer = (ROOT / "scripts" / "render_dashboard.py").read_text()
+    for name, text in (("VERIFY.md", verify), ("README-public.md", readme),
+                       ("render_dashboard.py", footer)):
+        assert "dispatch order" in text, f"{name} lost the dispatch-order disclosure"
+        for bad in ("relative metrics are robust.", "are robust to that. Hourly",
+                    "are robust to this."):
+            assert bad not in text, f"{name} again claims relative metrics are robust, unqualified"
+    assert "scripts/feasibility_report.py" in verify and "NOT robust" in verify
+    assert (ROOT / "scripts" / "feasibility_report.py").exists()
+
+
+def test_open_decisions_register_is_well_formed():
+    """Incident 2026-11-10: about 45 requests of the operator lived only in
+    report emails and roughly half were never answered. The register is the
+    tracking system; it only works if every row can be read mechanically (the
+    digest counts OPEN `D-` rows and ages the oldest). Each row: an ID with a
+    known prefix, an ISO date, OPEN or CLOSED, and — if CLOSED — what closed it."""
+    from datetime import date
+    txt = (ROOT / "docs" / "open-decisions.md").read_text()
+    rows = [[c.strip() for c in l.strip().strip("|").split("|")]
+            for l in txt.splitlines() if re.match(r"\|\s*[A-Z]-\d+\s*\|", l)]
+    assert len(rows) >= 10, "the register has lost its rows — has the table format changed?"
+    seen = set()
+    for r in rows:
+        assert len(r) == 5, f"register row is not 5 columns (a stray pipe?): {r[0]}"
+        rid, raised, status, what, where = r
+        assert re.fullmatch(r"[DTWC]-\d{2}", rid), f"bad register ID {rid!r}"
+        assert rid not in seen, f"duplicate register ID {rid}"
+        seen.add(rid)
+        date.fromisoformat(raised)
+        assert status in ("OPEN", "CLOSED"), f"{rid}: status must be OPEN or CLOSED, got {status!r}"
+        assert what, f"{rid}: empty description"
+        if status == "CLOSED":
+            assert where, f"{rid} is CLOSED but does not say what closed it"
+    assert any(r[0].startswith("D-") and r[2] == "OPEN" for r in rows) or "D-" not in txt
+    # private: it names findings and people's pending decisions; never mirrored
+    assert "open-decisions.md" not in (ROOT / "scripts" / "publish_mirror.sh").read_text()
+
+
+def test_policy_carries_amendment_1_as_ratified():
+    """Amendment 1 (ratified by the user in writing 2026-11-10) fixes what the
+    statistical referee could not determine on 2026-11-10: the Holm family, the
+    look schedule and the scope outside Spain. The referee reads the policy and
+    CLAUDE.md as its pre-registration surface, so both must carry it — and the
+    calibration hash clause 8 tells the referee to check must be the hash of the
+    file actually in the repo, or the frozen bar has moved without a ratification."""
+    import hashlib
+    flat = lambda text: re.sub(r"\s+", " ", re.sub(r"(?m)^> ?", "", text))   # ignore wrapping
+    pol = (ROOT / "docs" / "multiple-comparisons-policy.md").read_text()
+    amend = flat(pol.split("## Amendment 1", 1)[1])
+    assert "I ratify the draft as written, executable P&L deferred" in amend
+    for n in range(1, 9):
+        assert f"### Clause {n} — " in amend, f"Amendment 1 lost clause {n}"
+    assert "0.05 / 12" in amend and "separately in each market" in amend
+    assert "2026-11-11T03:30:00Z" in amend, "the ratification instant defines 'forward only'"
+    digest = hashlib.sha256((ROOT / "Data" / "calibration" / "sign_bar.json").read_bytes()).hexdigest()
+    assert digest in amend, ("Data/calibration/sign_bar.json no longer matches the hash recorded "
+                             "in Amendment 1 — changing the frozen calibration is user-gated")
+    claude = flat((ROOT / "CLAUDE.md").read_text())
+    assert "Amendment 1" in claude and "0.05/12" in claude and "2026-11-11T03:30:00Z" in claude
+    prop = (ROOT / "docs" / "proposals" / "comparison-rules-amendment-2026-11.md").read_text()
+    assert "STATUS: RATIFIED" in prop and "NOT IN FORCE" not in prop

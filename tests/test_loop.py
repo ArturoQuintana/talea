@@ -204,6 +204,68 @@ def test_second_market_runs_in_isolation(tmp_path):
     assert (tmp_path / "de" / "ledger.jsonl").exists()
 
 
+# --- a day settles only once it is COMPLETE (incident 2026-11-10, PT) ---
+
+def test_expected_hours_is_24_except_23_on_the_spring_forward_day():
+    from zoneinfo import ZoneInfo
+    for tz, spring, autumn in (("Europe/Madrid", date(2026, 3, 29), date(2026, 10, 25)),
+                               ("Europe/Lisbon", date(2026, 3, 29), date(2026, 10, 25)),
+                               ("America/Chicago", date(2027, 3, 14), date(2026, 11, 1))):
+        z = ZoneInfo(tz)
+        assert loop.expected_hours(spring, z) == 23, tz
+        assert loop.expected_hours(autumn, z) == 24, tz   # 25 real hours, 24 keys
+        assert loop.expected_hours(date(2026, 10, 9), z) == 24, tz
+    assert {loop.expected_hours(date(2026, m, 28), ZoneInfo("Asia/Tokyo"))
+            for m in range(1, 13)} == {24}                # no DST
+
+
+def test_a_day_missing_its_last_hour_does_not_settle_until_complete(tmp_path):
+    """PT 2026-10-09: Lisbon's hour 23 belongs to the NEXT CET auction day, so
+    the afternoon it 'publishes' the store holds hours 0-22 only. The old guard
+    (>= 23 hours) settled on that — and when hour 23 arrived as the 2nd-dearest
+    hour, the stored oracle was already wrong, permanently (append-only ledger;
+    verify_ledger went red for a month). The day must wait for its 24th hour,
+    and the oracle must be taken over all 24."""
+    pt = loop.Market.make("pt", "Europe/Lisbon", fetch=None,
+                          deadline_hour=12, currency="EUR", root=tmp_path)
+    d1 = _flat_day("2026-10-08", 60, cheap=(11, 12), dear=(19, 20))
+    s1 = tick(market=pt, fetch=lambda a, b: d1, today=date(2026, 10, 8))
+    assert [(r["buy_hours"], r["sell_hours"]) for r in s1["committed"]] == [([11, 12], [19, 20])]
+
+    hours = [80.0] * 24
+    hours[11] = hours[12] = 30.0
+    hours[19], hours[20], hours[23] = 130.0, 120.0, 125.0   # h23 outranks h20
+    full = _day("2026-10-09", hours)
+    partial = {ts: p for ts, p in full.items() if not ts.endswith("T23")}
+    assert len(partial) == 23
+
+    # afternoon of 10-08: hours 0-22 of the target are in — NOT a complete day
+    s2 = tick(market=pt, fetch=lambda a, b: {**d1, **partial}, today=date(2026, 10, 8))
+    assert s2["settled"] == []
+    assert not (tmp_path / "pt" / "ledger.jsonl").exists()
+
+    # next day hour 23 arrives: now it settles, against the whole day
+    s3 = tick(market=pt, fetch=lambda a, b: {**d1, **full}, today=date(2026, 10, 9))
+    e, = [x for x in s3["settled"] if x["target"] == "2026-10-09"]
+    assert e["pnl_eur"] == pytest.approx(0.85 * (130 + 120) - 60 - 1.85)      # 150.65
+    assert e["oracle_pnl_eur"] == pytest.approx(0.85 * (130 + 125) - 60 - 1.85)  # 154.90
+    assert e["capture"] == pytest.approx(0.973)        # not the 1.0 a 23-hour oracle gives
+    assert e["tb2_spread"] == pytest.approx(130 + 125 - 60)
+
+
+def test_spring_forward_day_still_settles_on_its_23_hours():
+    """The tolerance the old `>= 23` guard was FOR must survive the stricter
+    rule: on the spring-forward day the local frame genuinely has 23 hours
+    (Madrid skips 02:00), and that is a complete day."""
+    d1 = _flat_day("2026-03-28", 60, cheap=(3, 4), dear=(20, 21))
+    tick(fetch=lambda a, b: d1, today=date(2026, 3, 28))
+    d2 = {ts: p for ts, p in _flat_day("2026-03-29", 80, cheap=(3, 4), dear=(20, 21)).items()
+          if not ts.endswith("T02")}
+    assert len(d2) == 23
+    s = tick(fetch=lambda a, b: {**d1, **d2}, today=date(2026, 3, 29))
+    assert [e["target"] for e in s["settled"]] == ["2026-03-29"]
+
+
 def test_clock_guard_refuses_commit_after_deadline_even_with_stale_dataset():
     """The 2026-08-20 review finding: all fetches fail, tick runs late — the
     dataset-relative leak guard can't see published prices, so only the
@@ -549,9 +611,11 @@ def test_digest_builds_settlement_race_and_bar(monkeypatch, tmp_path):
     subject, body = cli.build_digest()
     assert "esios digest 2026-08-13" in subject and "+322" in subject
     assert "+322.13" in body and "tau 0.899" in body
-    # the digest is DESCRIPTIVE — it defers the verdict to the Option C bar and
-    # never auto-declares "BAR MET" (referee-gated, superseded-method guard)
-    assert "verdict via the Option C bar" in body and "BAR MET" not in body
+    # the digest COUNTS — it never prints a p-value or declares "BAR MET"
+    # (Amendment 1: decided only at a month-end review; referee-gated)
+    assert "decided only at a month-end review" in body and "BAR MET" not in body
+    assert " p=" not in body and "gate " not in body
+    assert "Dashboards: arturoquintana.github.io/talea" in body
     assert "ALERT" not in subject         # winning day, no alerts
 
 
@@ -573,8 +637,40 @@ def test_digest_never_auto_declares_bar_met(monkeypatch, tmp_path):
     (tmp_path / "ledger.jsonl").write_text(
         "\n".join(json.dumps(r) for r in rows) + "\n")
     _, body = cli.build_digest()
-    assert "BAR MET" not in body
-    assert "verdict via the Option C bar" in body
+    assert "BAR MET" not in body and " p=" not in body
+    # the confirmatory pair shows only its distance to the one terminal look
+    assert "(30W-0T-0L); confirmatory: 30 of 90 non-tied days" in body
+
+
+def test_digest_counts_progress_since_the_amendment_and_never_a_p_value(monkeypatch, tmp_path):
+    """The digest printed an iid p-value for every comparison every day; for
+    rankblend it read below 0.05 from 2026-09-14, at 21 non-tied days — a daily
+    look at a number the rules say to judge only at a decision point. Under
+    Amendment 1 it shows wins-ties-losses, and for an exploratory shadow how
+    many non-tied days settled AFTER the amendment count toward the 30 needed."""
+    import talea.__main__ as cli
+    monkeypatch.setattr(cli, "LEDGER", tmp_path / "ledger.jsonl")
+    monkeypatch.setattr(cli, "RECEIPTS", tmp_path / "receipts.jsonl")
+    monkeypatch.setattr(cli, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(cli, "REGISTER", tmp_path / "no-register.md")
+    rows = []
+    for i, (settled, shadow_pnl) in enumerate([
+            ("2026-11-09T16:00:00+00:00", 20.0),    # before the amendment: a win
+            ("2026-11-10T16:00:00+00:00", 20.0),    # before: a win
+            ("2026-11-11T16:00:00+00:00", 20.0),    # after: a win
+            ("2026-11-12T16:00:00+00:00", 10.0),    # after: a tie (same P&L)
+            ("2026-11-13T16:00:00+00:00", 5.0)]):   # after: a loss
+        d = f"2026-11-{10 + i:02d}"
+        rows += [{"target": d, "strategy": loop.STRATEGY, "pnl_eur": 10.0,
+                  "oracle_pnl_eur": 100.0, "capture": 0.1, "settled_at": settled},
+                 {"target": d, "strategy": "battery-2h2h-rankblend", "pnl_eur": shadow_pnl,
+                  "oracle_pnl_eur": 100.0, "capture": 0.2, "settled_at": settled}]
+    (tmp_path / "ledger.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    _, body = cli.build_digest()
+    line = next(l for l in body.splitlines() if l.startswith("battery-2h2h-rankblend vs primary"))
+    assert "over 5 shared (3W-1T-1L)" in line
+    assert "since the rules were amended 1W-1T-1L, 2 of 30 non-tied days" in line
+    assert "p=" not in body and "verdict" not in body and "Waiting on you" not in body
 
 
 def test_digest_includes_silent_markets(monkeypatch, tmp_path):

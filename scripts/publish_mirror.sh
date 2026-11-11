@@ -2,7 +2,7 @@
 # Publish the Talea public mirror: render the site, sync the allowlist, push.
 # Called after each tick on the server. Best-effort: never fails the tick. The
 # mirror checkout lives at $MIRROR_DIR (default ~/ledger-mirror) with its own
-# deploy key. ALLOWLIST ONLY — ops files (CLAUDE.md, AGENTS.md, plans, server
+# deploy key. ALLOWLIST ONLY — ops files (CLAUDE.md, plans, server
 # scripts) never leave the private repo.
 #
 # ONE project, many markets: this ONE mirror hosts every public market
@@ -50,7 +50,7 @@ rsync -a --delete --delete-excluded \
 rsync -a --delete --exclude __pycache__ src/ "$MIRROR/src/"
 rsync -a --delete --exclude __pycache__ tests/ "$MIRROR/tests/"
 rsync -a --delete --exclude __pycache__ scripts/ "$MIRROR/scripts/"
-cp VERIFY.md GOVERNANCE.md DATA-SOURCES.md pyproject.toml uv.lock "$MIRROR/"
+cp VERIFY.md GOVERNANCE.md DATA-SOURCES.md pyproject.toml uv.lock .python-version "$MIRROR/"
 [ -f LICENSE ] && cp LICENSE "$MIRROR/"
 for d in backtest-baselines-2015-2026.md backtest-markets-2026-08.md ARCHITECTURE.md \
          gate-analysis-plan.md gate-verdict-2026-08.md incidents.md \

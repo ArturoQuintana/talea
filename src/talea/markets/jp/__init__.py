@@ -7,8 +7,9 @@ driver="actions": JEPX publishes ~10:10 JST (~01:10 UTC) — the European night,
 the Hetzner server does not tick — so JP is driven by a GitHub Actions workflow
 (.github/workflows/jp.yml) timed BEFORE the 10:00 JST gate, the same pattern ERCOT
 uses for its geo-block. Asia/Tokyo, JPY (¥/MWh after the fetcher's ¥/kWh × 1000).
-deadline_hour=10 (Tokyo): the ~09:30-JST Actions tick commits before the 10:00 gate;
-the dataset-relative leak guard is the real gate.
+deadline_hour=10 (Tokyo): the Actions retry ladder (four rungs from just after JST
+midnight, see jp.yml) commits before the 10:00 gate; the dataset-relative leak guard
+is the real gate.
 
 Dedicated client (markets/jp/fetch.py, the JEPX spot CSV parser). Japan has NO DST
 (48 slots/day). Third market of the shortlist's 'Now' batch (GB, FR, JP).

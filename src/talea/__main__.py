@@ -11,7 +11,6 @@ import sys
 import urllib.request
 from datetime import datetime, timezone
 from email.message import EmailMessage
-from math import comb
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -20,6 +19,12 @@ from .loop import (DATA_DIR, LEDGER, RECEIPTS, STRATEGY, WriterLockError,
                    _load_jsonl, tick, writer_lock)
 
 REPO = Path(__file__).resolve().parents[2]
+# The comparison rules as amended (docs/multiple-comparisons-policy.md,
+# Amendment 1, ratified 2026-11-10). The digest only COUNTS toward them; it
+# never evaluates or declares anything.
+AMENDMENT_1_AT = "2026-11-11T03:30:00"          # UTC; rows settled later count
+CONFIRMATORY_SHADOW = "battery-2h2h-climatology"  # vs the primary, in ES
+REGISTER = REPO / "docs" / "open-decisions.md"
 OTS_DIR = DATA_DIR / "es" / "ots"      # ES now lives under Data/es/ (Stage B)
 # Pinned: the attestation path must not silently pull a new OTS client build
 # (supply-chain surface on the one thing that makes the ledger tamper-evident).
@@ -53,11 +58,6 @@ def heartbeat(ok: bool, *, _urlopen=urllib.request.urlopen) -> None:
         print(f"[esios-paper] heartbeat pinged{'' if ok else ' (FAIL signal)'}")
     except Exception as exc:
         print(f"[esios-paper] heartbeat ping failed: {exc}")
-
-
-def _sign_p(wins: int, n: int) -> float:
-    """One-sided binomial P(X >= wins | n, 0.5) — the pre-registered test."""
-    return sum(comb(n, i) for i in range(wins, n + 1)) / 2 ** n
 
 
 def _liveness_rows(now: datetime) -> list[dict]:
@@ -96,27 +96,42 @@ def build_digest(now: datetime | None = None) -> tuple[str, str] | None:
     lines.append(
         f"Primary: {total:+.2f} EUR over {len(prim)} days | "
         f"win rate {wins}/{len(prim)} | mean capture "
-        f"{statistics.fmean(caps) * 100:.1f}% | gate {min(len(prim), 21)}/21")
+        f"{statistics.fmean(caps) * 100:.1f}%")
 
-    by_day: dict[str, dict[str, float]] = {}
+    by_day: dict[str, dict[str, dict]] = {}
     for e in ledger:
-        by_day.setdefault(e["target"], {})[e["strategy"]] = e["pnl_eur"]
+        by_day.setdefault(e["target"], {})[e["strategy"]] = e
     for shadow in sorted({e["strategy"] for e in ledger} - {STRATEGY}):
-        deltas = [v[shadow] - v[STRATEGY] for v in by_day.values()
-                  if shadow in v and STRATEGY in v]
-        # DESCRIPTIVE ONLY. Ties per rule A (round-to-cents). The p here is the
-        # raw iid indicator; it is NOT the operative bar. The bar-met VERDICT is
-        # the pre-registered Option C bar (p_eff=max(p_iid,p_boot) + Holm), which
-        # is referee-gated and computed by `compare_strategies.py --panel` — the
-        # digest never auto-declares it (docs/multiple-comparisons-policy.md).
-        w = sum(1 for d in deltas if round(d, 2) >= 0.01)
-        l = sum(1 for d in deltas if round(d, 2) <= -0.01)
-        n = w + l
-        p = _sign_p(w, n) if n else 1.0
+        pairs = [(v[shadow], v[STRATEGY]) for _t, v in sorted(by_day.items())
+                 if shadow in v and STRATEGY in v]
+        # COUNTS ONLY — wins, ties and losses, ties per rule A (round-to-cents).
+        # No p-value and no verdict: under Amendment 1 a comparison is decided
+        # only at a month-end review, and the digest printing a p-value every
+        # day was itself a daily look (it showed rankblend below 0.05 from
+        # 2026-09-14, at 21 non-tied days). What the reader needs daily is how
+        # far each comparison is from its decision look.
+        def wtl(ps):
+            ds = [round(s["pnl_eur"] - p["pnl_eur"], 2) for s, p in ps]
+            w, l = sum(d >= 0.01 for d in ds), sum(d <= -0.01 for d in ds)
+            return w, len(ds) - w - l, l
+        w, t, l = wtl(pairs)
+        total = sum(s["pnl_eur"] - p["pnl_eur"] for s, p in pairs)
+        if shadow == CONFIRMATORY_SHADOW:
+            progress = (f"confirmatory: {min(w + l, 90)} of 90 non-tied days toward "
+                        f"its one terminal look")
+        else:
+            since = [(s, p) for s, p in pairs
+                     if min(s.get("settled_at", ""), p.get("settled_at", "")) > AMENDMENT_1_AT]
+            w2, t2, l2 = wtl(since)
+            progress = (f"since the rules were amended {w2}W-{t2}T-{l2}L, "
+                        f"{w2 + l2} of 30 non-tied days toward a decision look")
         lines.append(
-            f"{shadow} vs primary: {sum(deltas):+.2f} EUR over {len(deltas)} "
-            f"shared ({w}W-{len(deltas) - w - l}T-{l}L, iid p={p:.3f}) — "
-            f"verdict via the Option C bar (compare_strategies --panel)")
+            f"{shadow} vs primary: {total:+.2f} EUR over {len(pairs)} shared "
+            f"({w}W-{t}T-{l}L); {progress} — decided only at a month-end review")
+    waiting = _open_decisions((now or datetime.now(timezone.utc)).date())
+    if waiting:
+        lines.append("")
+        lines.append(waiting)
 
     prime = today.get(STRATEGY)
     if prime is not None and prime.get("tb2_spread") is not None:
@@ -160,13 +175,24 @@ def build_digest(now: datetime | None = None) -> tuple[str, str] | None:
         mrows = _load_jsonl(DATA_DIR / mk.slug / "ledger.jsonl")
         if not mrows:
             continue
+        tag = f"{mk.slug.upper()} {'public' if mk.public else 'silent'}"
         mp = [e for e in mrows if e["strategy"] == STRATEGY]
         if not mp:
+            # A market whose primary never commits (GB, by the nature of its
+            # feed) used to be skipped here, so a PUBLIC market was absent from
+            # every digest. Show what does commit.
+            parts = []
+            for name in sorted({e["strategy"] for e in mrows}):
+                rows = [e for e in mrows if e["strategy"] == name]
+                parts.append(f"{name.rsplit('-', 1)[-1]} {len(rows)} days "
+                             f"{sum(e['pnl_eur'] for e in rows):+.2f}")
+            lines.append("")
+            lines.append(f"[{tag}] primary does not commit here | " + " | ".join(parts)
+                         + f" | latest {max(e['target'] for e in mrows)}")
             continue
         last_t = max(e["target"] for e in mp)
         le = next(e for e in mp if e["target"] == last_t)
         mcaps = [e["capture"] for e in mp if e.get("capture") is not None]
-        tag = f"{mk.slug.upper()} {'public' if mk.public else 'silent'}"
         lines.append("")
         lines.append(
             f"[{tag}] {len(mp)} days | total {sum(e['pnl_eur'] for e in mp):+.2f} | "
@@ -174,9 +200,29 @@ def build_digest(now: datetime | None = None) -> tuple[str, str] | None:
             f"latest {last_t}: {le['pnl_eur']:+.2f} (cap {le.get('capture')})")
     lines.append("")
     lines.append("Paper money, upper bound (exchange fees only).")
-    lines.append("Dashboards: Spain arturoquintana.github.io/spain-dayahead-ledger"
-                 " · Germany arturoquintana.github.io/germany-dayahead-ledger")
+    lines.append("Dashboards: arturoquintana.github.io/talea")
     return subject, "\n".join(lines)
+
+
+def _open_decisions(today) -> str | None:
+    """One line for the digest: how many operator decisions are open in the
+    register, and how old the oldest is. Requests of the operator used to live
+    only in report emails and about half went unanswered (incident 2026-11-10);
+    this puts the count in front of the reader every day. None if there is no
+    register or nothing is open."""
+    from datetime import date
+    if not REGISTER.exists():
+        return None
+    rows = []
+    for line in REGISTER.read_text().splitlines():
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) == 5 and cells[0].startswith("D-") and cells[2] == "OPEN":
+            rows.append((date.fromisoformat(cells[1]), cells[0]))
+    if not rows:
+        return None
+    raised, rid = min(rows)
+    return (f"Waiting on you: {len(rows)} open decision{'s' if len(rows) != 1 else ''} "
+            f"(oldest {rid}, {(today - raised).days} days) — docs/open-decisions.md")
 
 
 def email_digest(summary: dict, *, _smtp=smtplib.SMTP) -> None:
@@ -208,9 +254,14 @@ def email_digest(summary: dict, *, _smtp=smtplib.SMTP) -> None:
             body = "TICK TROUBLE: " + "; ".join(problems) + "\n\n" + body
             if not subject.startswith("ALERT"):
                 subject = "ALERT — " + subject
+        sender = _env("ALERT_SMTP_USER") or to
         msg = EmailMessage()
-        msg["From"] = _env("ALERT_SMTP_USER") or to
+        msg["From"] = sender
         msg["To"] = to
+        if sender != to:
+            # the alert account keeps a copy in its own inbox: it is the one
+            # mailbox the project's agents can read
+            msg["Cc"] = sender
         msg["Subject"] = subject
         msg.set_content(body)
         with _smtp("smtp.gmail.com", 587, timeout=30) as s:
@@ -299,6 +350,24 @@ def git_backup(label: str) -> None:
         print(f"[esios-paper] backup: COMMIT-FAILED {c.stderr.strip()[:200]}")
         return
     p = run("push")
+    if p.returncode != 0:
+        # Self-heal a REJECTED push (non-fast-forward): other writers (ERCOT/JP
+        # GitHub Actions) push Data/<their slug>/ to the same main between our
+        # pull and our push. A bare retry-next-tick never recovers — the next
+        # pre-tick `pull --ff-only` fails on the now-diverged history, so every
+        # later commit stays local forever (incident 2026-11-03..09: ES/DE/GB
+        # never reached origin and ERCOT never reached the mirror). Rebase our
+        # UNPUSHED local commits onto origin (writers own disjoint Data/<slug>/
+        # paths, so this is conflict-free; on any conflict we abort and leave
+        # the local state intact) and push once more. Never a force-push: no
+        # published history is rewritten. No --autostash: on a dirty tree it can
+        # exit 0 with conflict markers left in a file; without it a dirty tree
+        # makes the rebase refuse and the failure is logged below.
+        r = run("pull", "--rebase")
+        if r.returncode != 0:
+            run("rebase", "--abort")
+        else:
+            p = run("push")
     print("[esios-paper] backup: pushed" if p.returncode == 0
           else f"[esios-paper] backup: committed, PUSH-FAILED (will ride next "
                f"push) {p.stderr.strip()[:200]}")

@@ -413,3 +413,93 @@ def test_losing_primary_day_and_total_are_signed_and_red(monkeypatch, tmp_path):
     assert "+-" not in html
     assert '<div class="v neg">−42.10' in html          # net P&L tile
     assert '<td class="neg">−42.10</td>' in html        # primary ledger row
+
+
+def test_stale_market_page_says_so(monkeypatch, tmp_path):
+    """Independent-audit finding (2026-11-09, ERCOT): the page said "data as of
+    2026-11-08" (the RENDER time) while its data stopped at 2026-11-03 and the
+    11-04 receipts sat 'Pending' five days past target — no stale note. A market
+    whose audit files stopped advancing must carry a stale banner on every
+    template; a healthy one must not."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    days = ["2026-11-02", "2026-11-03"]
+    ledger = [_settle("2026-11-03", P, 100.0, 120.0, 0.83)]
+    receipts = [_receipt("2026-11-03", "2026-11-02", P,
+                         committed="2026-11-02T09:04:00+00:00"),
+                _receipt("2026-11-04", "2026-11-03", P,
+                         committed="2026-11-03T11:01:00+00:00")]
+    _seed(monkeypatch, tmp_path / "full", "ercot", days, ledger, receipts)
+    monkeypatch.setattr(rd, "_now", lambda: datetime(
+        2026, 11, 8, 17, 1, tzinfo=ZoneInfo("Europe/Madrid")))
+    html = rd.build("ercot")
+    assert "Stale data" in html and "2026-11-03" in html
+    assert "2026-11-03 11:01 UTC" in html
+    # shadow-only and awaiting templates too
+    _seed(monkeypatch, tmp_path / "shadow", "ercot", days,
+          [_settle("2026-11-03", C, 100.0, 120.0, 0.83)],
+          [_receipt("2026-11-03", "2026-11-02", C,
+                    committed="2026-11-02T09:04:00+00:00")])
+    assert "Stale data" in rd.build("ercot")
+    _seed(monkeypatch, tmp_path / "await", "ercot", days, [],
+          [_receipt("2026-11-04", "2026-11-03", C,
+                    committed="2026-11-03T11:01:00+00:00")])
+    assert "Stale data" in rd.build("ercot")
+    # healthy: same data, rendered the next morning -> no banner
+    monkeypatch.setattr(rd, "_now", lambda: datetime(
+        2026, 11, 4, 9, 0, tzinfo=ZoneInfo("Europe/Madrid")))
+    _seed(monkeypatch, tmp_path / "ok", "ercot", days, ledger, receipts)
+    assert "Stale data" not in rd.build("ercot")
+
+# ---- as-of stamp is the market's own wall clock (audit finding 2026-11-02) ----
+
+_RENDER_UTC = "2026-11-01T16:01:00+00:00"   # the render the auditor checked
+_EXPECTED_ASOF = {"es": "2026-11-01 17:01 Madrid", "de": "2026-11-01 17:01 Berlin",
+                  "gb": "2026-11-01 16:01 London", "ercot": "2026-11-01 10:01 Chicago"}
+
+
+def _frozen_datetime(utc_iso):
+    from datetime import datetime as _dt
+
+    class _Frozen(_dt):
+        @classmethod
+        def now(cls, tz=None):
+            t = _dt.fromisoformat(utc_iso)
+            return t.astimezone(tz) if tz else t.replace(tzinfo=None)
+    return _Frozen
+
+
+@pytest.mark.parametrize("slug", sorted(_EXPECTED_ASOF))
+def test_asof_stamp_uses_market_timezone_on_full_page(monkeypatch, tmp_path, slug):
+    """gb.html printed Madrid's clock labelled 'London' (1h off) and ercot.html
+    printed it labelled 'Chicago' (7h off, later than the commit itself). The
+    label names the market's city, so the time must be that city's wall clock.
+    Exercised through the real clock path (datetime.now frozen), not an injected
+    argument, so it fails exactly the way the shipped bug did."""
+    monkeypatch.setattr(rd, "datetime", _frozen_datetime(_RENDER_UTC))
+    ledger = [_settle("2026-08-13", P, 100.0, 120.0, 0.83)]
+    receipts = [_receipt("2026-08-13", "2026-08-12", P)]
+    _seed(monkeypatch, tmp_path, slug, ["2026-08-12", "2026-08-13"], ledger, receipts)
+    html = rd.build(slug)
+    assert _EXPECTED_ASOF[slug] in html
+
+
+def test_asof_stamp_uses_market_timezone_on_light_templates(monkeypatch, tmp_path):
+    """The awaiting and shadow-only templates share _page_head — same contract."""
+    now = rd.datetime.fromisoformat(_RENDER_UTC)
+    receipts = [_receipt("2026-08-13", "2026-08-12", P)]
+    _seed(monkeypatch, tmp_path / "aw", "ercot", ["2026-08-12"], [], receipts)
+    assert _EXPECTED_ASOF["ercot"] in rd.build("ercot", now=now)
+    ledger = [_settle("2026-08-13", C, 50.0, 120.0, 0.42)]
+    _seed(monkeypatch, tmp_path / "sh", "gb", ["2026-08-12", "2026-08-13"], ledger,
+          [_receipt("2026-08-13", "2026-08-12", C)])
+    html = rd.build("gb", now=now)
+    assert _EXPECTED_ASOF["gb"] in html and "17:01 London" not in html
+
+
+def test_every_presented_market_carries_its_timezone():
+    """Detector: a market added to the registry without a tz would silently
+    fall back to someone else's clock."""
+    from zoneinfo import ZoneInfo
+    for slug, cfg in rd.MARKETS.items():
+        assert isinstance(cfg["tz"], ZoneInfo), slug

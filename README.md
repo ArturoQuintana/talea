@@ -54,7 +54,11 @@ top-bottom-2 spread).
 
 Honesty note: absolute currency figures are an upper bound — fees cover the
 exchange only, not grid charges, taxes, or aggregator margin. Relative metrics
-(capture, tau) are robust to this. Prices come from each market's public source
+(capture, tau) are robust to the fee assumption. A second caveat is larger: the
+P&L does not enforce dispatch order. On some days a strategy's sell hours come
+before its buy hours, which a battery that starts the day empty cannot run, and
+comparisons between strategies are NOT robust to that — see VERIFY.md section 4
+for the measured effect. Prices come from each market's public source
 above; Spain is cross-checked weekly against the independent token-based ESIOS
 route.
 

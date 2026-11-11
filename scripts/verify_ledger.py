@@ -29,10 +29,28 @@ from pathlib import Path
 DATA = Path(__file__).resolve().parents[1] / "Data"
 PNL_TOL = 0.005      # ledger pnl/oracle are rounded to 2 dp
 CAP_TOL = 0.0005     # capture rounded to 3 dp
-MIN_DAY_HOURS = 23   # a fully-published day (23 on the DST-spring day)
 HOLE_DAYS = 2        # an unsettled target this many days behind the newest stored
                      # day, with no/partial prices, is a hole in the dataset of record
 OTS_CLIENT = "opentimestamps-client==0.7.2"   # pinned (see __main__.OTS_CLIENT)
+
+# DISCLOSED EXCEPTIONS — settled rows whose stored oracle can never re-derive
+# and can never be corrected, because the ledger is append-only. This is NOT a
+# waiver list: each entry pins the EXACT stored and re-derived oracle, so it
+# excuses that one documented discrepancy and nothing else. Any other value on
+# the same rows still FAILs, an entry whose rows no longer show the discrepancy
+# FAILs too (the list cannot rot), and pnl / prices / hours / capture-vs-stored-
+# oracle are checked on these rows exactly as on every other. Every use is
+# printed (KNOWN) and counted in the market's status line.
+KNOWN_ORACLE_EXCEPTIONS: dict[tuple[str, str], dict] = {
+    ("pt", "2026-10-09"): {
+        "ledger": 330.5, "rederived": 330.7,
+        "why": ("settled on 23 of 24 hours — Lisbon's hour 23 belongs to the NEXT "
+                "CET auction day and arrived a day later, as the 2nd-dearest hour. "
+                "pnl is unaffected; the stored oracle is 0.20 EUR low and capture "
+                "at most 0.001 high. The loop now waits for the complete day "
+                "(docs/incidents.md, 2026-11-10)"),
+    },
+}
 
 
 # --- the P&L math, reimplemented independently (mirrors the doc, not the code) ---
@@ -71,6 +89,16 @@ def day_profile(prices: dict[str, float], target: str) -> dict[int, float]:
     return {int(ts[11:13]): p for ts, p in prices.items() if ts[:10] == target}
 
 
+def fully_published(actual: dict[int, float]) -> bool:
+    """24 local hours — or the 23 of a spring-forward day, whose gap is an
+    INTERIOR hour (01:00-03:00 local). A day still missing its LAST hour is not
+    complete: PT's hour 23 arrives a day after hours 0-22. Timezone-free on
+    purpose, so this file keeps importing nothing from talea."""
+    if len(actual) >= 24:
+        return True
+    return len(actual) == 23 and 0 in actual and 23 in actual
+
+
 def prefix_hashes(path: Path) -> dict[str, int]:
     """sha256(first k lines) -> k, for every k. Append-only means a manifest
     taken when the file had k lines hashes the current file's k-line prefix."""
@@ -94,11 +122,13 @@ class Report:
         self.fails: list[str] = []
         self.warns: list[str] = []
         self.info: list[str] = []
+        self.known: list[str] = []     # disclosed exceptions actually used
         self.checked = 0
 
     def fail(self, m): self.fails.append(m)
     def warn(self, m): self.warns.append(m)
     def note(self, m): self.info.append(m)
+    def disclose(self, m): self.known.append(m)
 
 
 def verify_market(slug: str, verify_ots: bool) -> Report:
@@ -129,6 +159,7 @@ def verify_market(slug: str, verify_ots: bool) -> Report:
         led_by_key[key] = e
 
     # 1) every settlement re-derived from raw prices + the receipt's own params
+    exceptions_hit: set[tuple[str, str]] = set()
     for key, e in led_by_key.items():
         rec = rec_by_key.get(key)
         if rec is None:
@@ -157,15 +188,33 @@ def verify_market(slug: str, verify_ots: bool) -> Report:
             r.fail(f"{key}: pnl re-derived {got_pnl} != ledger {e['pnl_eur']}")
         ob, os_ = pick_extremes(actual, len(e["buy_hours"]))
         got_oracle = pnl(ob, os_, actual, params)
-        if abs(got_oracle - e["oracle_pnl_eur"]) > PNL_TOL:
+        ref_oracle = got_oracle        # what capture must be consistent with
+        exc = KNOWN_ORACLE_EXCEPTIONS.get((slug, e["target"]))
+        if exc is not None:
+            if (abs(e["oracle_pnl_eur"] - exc["ledger"]) <= PNL_TOL
+                    and abs(got_oracle - exc["rederived"]) <= PNL_TOL):
+                exceptions_hit.add((slug, e["target"]))
+                ref_oracle = e["oracle_pnl_eur"]
+                r.disclose(f"{key}: oracle {e['oracle_pnl_eur']} in the ledger vs "
+                           f"{got_oracle} re-derived — {exc['why']}")
+            else:
+                r.fail(f"{key}: listed in KNOWN_ORACLE_EXCEPTIONS as ledger "
+                       f"{exc['ledger']} / re-derived {exc['rederived']}, but found "
+                       f"ledger {e['oracle_pnl_eur']} / re-derived {got_oracle} — "
+                       f"the exception does not cover this")
+        elif abs(got_oracle - e["oracle_pnl_eur"]) > PNL_TOL:
             r.fail(f"{key}: oracle re-derived {got_oracle} != ledger "
                    f"{e['oracle_pnl_eur']}")
-        exp_cap = round(got_pnl / got_oracle, 3) if got_oracle > 0 else None
+        exp_cap = round(got_pnl / ref_oracle, 3) if ref_oracle > 0 else None
         if exp_cap is None or e.get("capture") is None:
             if exp_cap != e.get("capture"):
                 r.fail(f"{key}: capture {e.get('capture')} != re-derived {exp_cap}")
         elif abs(exp_cap - e["capture"]) > CAP_TOL:
             r.fail(f"{key}: capture {e['capture']} != re-derived {exp_cap}")
+    for exc_slug, exc_target in sorted(KNOWN_ORACLE_EXCEPTIONS):
+        if exc_slug == slug and (exc_slug, exc_target) not in exceptions_hit:
+            r.fail(f"KNOWN_ORACLE_EXCEPTIONS lists ({exc_slug}, {exc_target}) but no "
+                   f"settled row shows that discrepancy — remove the stale entry")
 
     # 2) leak-guard / temporal integrity on every receipt
     for key, rec in rec_by_key.items():
@@ -192,7 +241,7 @@ def verify_market(slug: str, verify_ots: bool) -> Report:
             continue
         actual = day_profile(prices, rec["target"])
         chosen = rec["buy_hours"] + rec["sell_hours"]
-        if len(actual) >= MIN_DAY_HOURS and all(h in actual for h in chosen):
+        if fully_published(actual) and all(h in actual for h in chosen):
             r.warn(f"{key}: target fully published but UNSETTLED (settles next tick?)")
         elif newest_day and (date.fromisoformat(newest_day)
                              - date.fromisoformat(rec["target"])).days >= HOLE_DAYS:
@@ -279,12 +328,15 @@ def main() -> int:
         print(f"\n=== {slug.upper()} — {rep.checked} settlements re-derived ===")
         for m in rep.info:
             print(f"  info  {m}")
+        for m in rep.known:
+            print(f"  KNOWN {m}")
         for m in rep.warns:
             print(f"  WARN  {m}")
         for m in rep.fails:
             print(f"  FAIL  {m}")
         status = "FAIL" if rep.fails else ("clean" if not rep.warns else "clean (warnings)")
-        print(f"  -> {status}: {len(rep.fails)} fail, {len(rep.warns)} warn")
+        known = f", {len(rep.known)} disclosed exception(s)" if rep.known else ""
+        print(f"  -> {status}: {len(rep.fails)} fail, {len(rep.warns)} warn{known}")
         any_fail |= bool(rep.fails)
 
     print(f"\n{'DISCREPANCY FOUND' if any_fail else 'ALL CHECKS PASSED'}")

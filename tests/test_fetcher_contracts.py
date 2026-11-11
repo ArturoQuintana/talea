@@ -110,11 +110,43 @@ def test_pt_entsoe_a44_aggregates_quarter_hours(monkeypatch):
                                        _open=router({"web-api.tp.entsoe.eu": xml}, calls))
     out = fetch_pt(date(2026, 8, 20), date(2026, 8, 20))
     assert len(out) == 24
-    assert out["2026-08-20T00"] == 182.11
-    assert out["2026-08-20T12"] == 110.11
-    assert out["2026-08-20T23"] == 196.59
+    # The fixture is SYNTHETIC (prices from a formula, see its header): expected
+    # values were computed by hand from that formula, not read off the parser.
+    # T00 = period 2, positions 5-8 -> mean(54.75, 53.5, 55.0, 56.5)
+    assert out["2026-08-20T00"] == 54.94
+    # T12 = period 2, positions 53-56, where 53 and 55 are OMITTED (curveType A03:
+    # carry the previous price) -> mean(78.5, 78.75, 78.75, 79.0)
+    assert out["2026-08-20T12"] == 78.75
+    # T23 = period 3, positions 1-4 -> mean(61.5, 63.0, 61.75, 63.25)
+    assert out["2026-08-20T23"] == 62.38
     assert "documentType=A44" in calls[0] and "securityToken=test-token" in calls[0]
     assert f"in_Domain={PT}" in calls[0]        # targets the Portugal zone (EIC guard)
+
+
+def _not_synthetic(text: str) -> bool:
+    """True if `text` is an ENTSO-E document that is not marked synthetic."""
+    is_entsoe = "iec62325" in text or "Publication_MarketDocument" in text
+    return is_entsoe and "<mRID>synthetic-fixture</mRID>" not in text
+
+
+def test_entsoe_fixtures_are_synthetic():
+    """Incident 2026-11-11: a real ENTSO-E A44 response for Portugal (three days
+    of 15-minute prices) sat in tests/fixtures/ and was published on the public
+    mirror from late August, because publish_mirror.sh syncs tests/ whole and the
+    data allowlist only guards Data/. ENTSO-E prices are not freely
+    redistributable (IT/PT/FR are private for that reason). Any ENTSO-E document
+    kept as a fixture must be synthetic and say so in its mRID."""
+    for f in sorted(FIX.iterdir()):
+        text = f.read_text(errors="replace")
+        assert not _not_synthetic(text), (
+            f"{f.name} is an ENTSO-E document not marked synthetic — tests/ is "
+            f"published; replace its prices with generated ones")
+    # the guard must be able to fail the way the real defect did
+    real = ('<Publication_MarketDocument xmlns="urn:iec62325.351:tc57wg16:451-3:'
+            'publicationdocument:7:3"><mRID>13482adfbeb94275</mRID>')
+    assert _not_synthetic(real)
+    assert not _not_synthetic(real.replace("13482adfbeb94275", "synthetic-fixture"))
+    assert not _not_synthetic('{"series": [[1786917600000, 83.63]]}')   # not ENTSO-E
 
 
 def test_fr_entsoe_targets_the_france_zone(monkeypatch):

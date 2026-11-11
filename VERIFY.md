@@ -42,6 +42,20 @@ Not every market carries the same strength of evidence yet; stated plainly:
   rely on the OTS manifests or the GitHub Actions run history for the
   `ercot.yml` workflow (shown on request). Arithmetic and append-only hold
   regardless.
+  **Second evidence boundary — targets 2026-11-05 → 2026-11-11** (server-sync
+  outage; `docs/incidents.md`, 2026-11-09 row): ERCOT ticks on GitHub Actions
+  and reaches this repo only through the publishing server, whose private
+  clone could not pull for a week. So ERCOT's receipts for those seven targets
+  entered this repo together in ONE commit (`7f05f41`, 2026-11-10T23:03:58Z) —
+  AFTER the prices for every one of them had published — and the ERCOT page
+  sat frozen at target 2026-11-04 throughout. The "weak check" therefore does
+  NOT corroborate those seven targets from this repo. What does: the OTS
+  manifests `Data/ercot/ots/2026-11-04*` → `2026-11-10*`, each stamped by the
+  Actions run at tick time (still "pending" until the weekly upgrade matures
+  them — `ots info` is the ground truth), and the `ercot.yml` run history plus
+  the on-time per-tick commits in the private repo (shown on request). The
+  receipts themselves were not written late: every `committed_at` in the
+  window is 7.7–9.1 hours ahead of its 13:30 CT publication.
 - **gb** — launched 2026-08-28; committed receipts per-tick from 2026-08-30,
   settled days from target 2026-08-31 (shadow strategies — see below), OTS-
   stamped manifests from 2026-08-29 (the earliest Bitcoin-CONFIRMED, the newest
@@ -137,6 +151,20 @@ adding no pre-publication evidence — so we don't. **STATUS (ratified
 action item** — like the pre-2026-08-08 no-OTS window above, it will not be
 "resolved" because minting adds nothing a skeptic should value; it is stated
 here so the record is complete.
+**Server-sync outage, 2026-11-04 → 2026-11-10** (`docs/incidents.md`,
+2026-11-09 row). ES, DE and GB kept reaching this mirror at every tick, so
+their weak check holds through the window, with one caveat: `%cI` is the time
+a commit was MADE, which normally precedes the push by seconds. The publish
+of 2026-11-04 10:01 UTC failed to push and reached GitHub with the next one
+at 11:31 UTC — 90 minutes later than its `%cI` says, though still ahead of
+that day's ES (12:15 UTC) and DE (11:40 UTC) publications, and GB's index
+for a target day does not begin to populate until the day itself. (A second failed
+push, 2026-11-05 16:01 UTC, carried settlements but no receipts.) ERCOT was
+hit harder — see its bullet above. In the PRIVATE repo the server's ticks for
+the whole window were pushed late in one batch on 2026-11-10: their author
+dates are original, their committer dates are the recovery time, so for
+those days this mirror's history and the OTS proofs — not the private repo's
+commit times — are the corroboration.
 Data/esios_prices.json (the independent cross-check route) updates
 WEEKLY by design — staleness under 7 days is normal.
 
@@ -193,8 +221,59 @@ Paper trading — no market participation, execution assumed at the clearing
 price (realistic for 1 MW, a price-taker). The 0.5 EUR/MWh fee covers
 exchange fees only: no grid charges, taxes, or aggregator margin, so absolute
 EUR is an upper bound on what a real asset would net. Relative metrics
-(capture, tau, strategy deltas) are robust to that. Hourly frame; the market
-itself clears at 15-minute granularity since 2025-10-01.
+(capture, tau, strategy deltas) are robust to the FEE assumption — but not to
+dispatch order, which is the larger caveat (next paragraph). Hourly frame; the
+market itself clears at 15-minute granularity since 2025-10-01.
+
+**The P&L does not enforce dispatch order** (disclosed 2026-11-11; found by the
+project's red-team review of 2026-10-01). The settlement formula pairs each
+day's two sell hours with the same day's two buy hours and ignores which comes
+first. On a day when a strategy's sell hours fall before its buy hours, a
+battery that starts the day empty cannot run that schedule; one that starts it
+charged is selling energy it bought on another day, at another price. The
+oracle is computed the same way, so "perfect hindsight" is sometimes an
+unexecutable schedule too.
+
+`scripts/feasibility_report.py` measures the effect from the audit files alone,
+under two readings. *Continuous*: one battery follows every receipt in time
+order and carries its charge across midnight. *Daily-reset*: the battery is
+empty at every midnight — the strict reading. Snapshot over all settled days
+through target 2026-11-11 (GB through 2026-11-09; run the script for today's
+figures), recomputed independently before publication; the last two columns
+are the share of the booked P&L the battery could actually dispatch:
+
+| Market | Strategy | Settled days | Out-of-order days | Booked | Continuous | Daily-reset |
+|---|---|---|---|---|---|---|
+| ES | persistence (primary) | 102 | 21 | 29,946 EUR | 91% | 86% |
+| ES | climatology | 101 | 0 | 30,434 EUR | 100% | 100% |
+| ES | rankblend | 92 | 10 | 27,846 EUR | 96% | 94% |
+| ES | weekly | 81 | 19 | 23,304 EUR | 88% | 80% |
+| DE | persistence (primary) | 76 | 21 | 15,651 EUR | 86% | 70% |
+| DE | climatology | 80 | 0 | 18,655 EUR | 100% | 100% |
+| DE | rankblend | 76 | 7 | 16,611 EUR | 98% | 95% |
+| DE | weekly | 79 | 21 | 16,920 EUR | 89% | 64% |
+| GB | climatology | 71 | 0 | 8,700 GBP | 100% | 100% |
+| GB | weekly | 71 | 23 | 7,332 GBP | 76% | 20% |
+| ERCOT | persistence (primary) | 72 | 7 | 5,238 USD | 99% | 96% |
+| ERCOT | climatology | 72 | 0 | 5,474 USD | 100% | 100% |
+| ERCOT | rankblend | 72 | 1 | 5,481 USD | 100% | 100% |
+| ERCOT | weekly | 72 | 6 | 4,953 USD | 97% | 94% |
+
+What this means:
+
+- **Absolute figures** overstate what the simulated battery could have
+  dispatched by the shares above, on top of the fee caveat.
+- **Comparisons between strategies are NOT robust to it.** Climatology has no
+  out-of-order day in any market; persistence and weekly have many. In Spain the
+  booked totals put climatology and persistence within a few hundred EUR of each
+  other; on the executable totals above climatology is ahead by about 3,000
+  (continuous) to 4,800 EUR (daily-reset).
+- **What it does not touch:** the receipts, their timing, and the arithmetic of
+  the booked formula. Every ledger row still re-derives exactly (section 2).
+- **Decision rules:** the pre-registered comparisons and promotion rules are
+  defined on the booked P&L. Whether an executable-dispatch metric joins or
+  replaces it is an open decision; it will be pre-registered before it is used
+  for any verdict.
 
 Two disclosures the verified-track-record industry has taught us to make
 explicitly (see docs/research-track-records-2026-08.md): these are SIGNAL

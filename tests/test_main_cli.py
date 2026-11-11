@@ -105,8 +105,9 @@ def test_main_unknown_command(monkeypatch, stub_cmds, capsys):
 
 class _FakeGit:
     """Stand-in for subprocess.run over `git -C REPO <sub> ...`."""
-    def __init__(self, diff=1, commit=0, push=0):
-        self.rc = {"add": 0, "diff": diff, "commit": commit, "push": push}
+    def __init__(self, diff=1, commit=0, push=0, pull=0):
+        self.rc = {"add": 0, "diff": diff, "commit": commit, "push": push,
+                   "pull": pull, "rebase": 0}
         self.seen = []
     def __call__(self, cmd, **kw):
         sub = cmd[3]
@@ -140,6 +141,15 @@ def test_git_backup_commit_failure_does_not_push(monkeypatch, capsys):
 def test_git_backup_push_failure_is_logged_not_raised(monkeypatch, capsys):
     out = _backup(monkeypatch, _FakeGit(diff=1, commit=0, push=1), capsys)
     assert "PUSH-FAILED" in out and "ride next" in out
+
+
+def test_git_backup_failed_rebase_is_aborted_and_not_pushed_again(monkeypatch, capsys):
+    """Rejected push -> pull --rebase; if THAT fails the rebase is aborted (never
+    left half-applied) and the failure is logged, not raised (incident 2026-11-03)."""
+    fake = _FakeGit(diff=1, commit=0, push=1, pull=1)
+    out = _backup(monkeypatch, fake, capsys)
+    assert "PUSH-FAILED" in out
+    assert fake.seen[-2:] == ["pull", "rebase"] and fake.seen.count("push") == 1
 
 
 # ---- _print_summary / _env / email no-config ---------------------------------
@@ -190,7 +200,32 @@ def test_build_digest_crosscheck_alert_and_shadow_without_primary(monkeypatch, t
         "strategy_version": V, "pnl_eur": 5.0, "capture": 0.9}) + "\n")
     subject, body = cli.build_digest()
     assert "CROSSCHECK-ALERTS.log present" in body and subject.startswith("ALERT")
-    assert "[DE public]" not in body        # skipped: no primary strategy rows
+    # A market whose primary never commits used to be skipped — which left GB,
+    # a PUBLIC market, out of every digest. It now shows what does commit.
+    assert "[DE public] primary does not commit here | climatology 1 days +5.00 | latest 2026-08-13" in body
+
+
+def test_digest_prints_open_operator_decisions(monkeypatch, tmp_path):
+    """Incident 2026-11-10: requests of the operator lived only in report
+    emails and about half went unanswered. The register's OPEN `D-` rows are
+    counted in every digest, with the age of the oldest."""
+    from datetime import datetime, timezone
+    _seed(monkeypatch, tmp_path, ledger=[
+        {"target": "2026-08-13", "strategy": loop.STRATEGY, "strategy_version": V,
+         "pnl_eur": 10.0, "capture": 0.9, "tau": 0.9}])
+    reg = tmp_path / "open-decisions.md"
+    monkeypatch.setattr(cli, "REGISTER", reg)
+    now = datetime(2026, 11, 11, 16, 0, tzinfo=timezone.utc)
+    assert "Waiting on you" not in cli.build_digest(now)[1]          # no register
+    reg.write_text("| ID | Raised | Status | Decision | Where |\n|---|---|---|---|---|\n"
+                   "| D-06 | 2026-09-07 | OPEN | GB framing | default continues |\n"
+                   "| D-02 | 2026-10-01 | CLOSED | rules | ratified |\n"
+                   "| D-12 | 2026-08-29 | OPEN | token expiry | none shown |\n"
+                   "| T-06 | 2026-11-10 | OPEN | tooling | executor's, not counted |\n")
+    assert ("Waiting on you: 2 open decisions (oldest D-12, 74 days) — docs/open-decisions.md"
+            in cli.build_digest(now)[1])
+    reg.write_text("| D-02 | 2026-10-01 | CLOSED | rules | ratified |\n")
+    assert "Waiting on you" not in cli.build_digest(now)[1]          # nothing open
 
 
 class _FakeSMTP:
@@ -305,3 +340,35 @@ def test_liveness_rows_cover_every_registered_market(monkeypatch, tmp_path):
     rows = cli._liveness_rows(datetime(2026, 10, 1, tzinfo=timezone.utc))
     assert [r["slug"] for r in rows] == list(MARKETS)
     assert {r["state"] for r in rows} == {"NEVER"}      # empty tree: nothing stale
+
+
+def test_digest_is_copied_to_the_alert_account(monkeypatch, tmp_path):
+    """The alert account is the one mailbox the project's agents can read; a
+    digest sent from it to the operator alone sat only in its Sent folder."""
+    _seed(monkeypatch, tmp_path, ledger=[
+        {"target": "2026-08-13", "strategy": loop.STRATEGY, "strategy_version": V,
+         "pnl_eur": 10.0, "capture": 0.9, "tau": 0.9}])
+    monkeypatch.setattr(cli, "REGISTER", tmp_path / "none.md")
+    seen = {}
+    class Capture(_FakeSMTP):
+        def send_message(self, msg):
+            seen.update(to=msg["To"], cc=msg["Cc"], sender=msg["From"])
+    monkeypatch.setenv("ALERT_EMAIL_TO", "operator@example.test")
+    monkeypatch.setenv("ALERT_SMTP_PASSWORD", "pw")
+    monkeypatch.setenv("ALERT_SMTP_USER", "alerts@example.test")
+    cli.email_digest({"settled": [{"x": 1}], "primary_receipt_stands": True}, _smtp=Capture)
+    assert seen == {"to": "operator@example.test", "cc": "alerts@example.test",
+                    "sender": "alerts@example.test"}
+    monkeypatch.delenv("ALERT_SMTP_USER")            # sender = recipient: no copy to itself
+    cli.email_digest({"settled": [{"x": 1}], "primary_receipt_stands": True}, _smtp=Capture)
+    assert seen["cc"] is None and seen["sender"] == "operator@example.test"
+
+
+def test_stale_prices_line_does_not_blame_the_fetcher():
+    """2026-11-04..10: the digest said "(fetcher stopped)" for JP and ERCOT every
+    day while their fetchers were fine and the server's clone had stopped
+    pulling. The line must name both possibilities."""
+    from talea.liveness import describe
+    line = describe({"state": "STALE", "slug": "ercot", "fetch_stale": True, "price_age_d": 5})
+    assert "prices 5d stale" in line and "fetcher stopped" not in line
+    assert "its writer stopped" in line and "not pulling" in line

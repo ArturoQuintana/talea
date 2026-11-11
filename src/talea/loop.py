@@ -309,6 +309,16 @@ def day_profile(prices: dict[str, float], d: date) -> dict[int, float]:
     return {int(ts[11:13]): p for ts, p in prices.items() if ts[:10] == key}
 
 
+def expected_hours(d: date, tz: ZoneInfo) -> int:
+    """How many hourly keys a FULLY published market-local day d holds: 24, or
+    23 on the spring-forward day. The frame is keyed by local clock hour, so
+    the autumn day's 25 real hours collapse to 24 keys. Pure."""
+    nxt = d + timedelta(days=1)
+    start = datetime(d.year, d.month, d.day, tzinfo=tz).astimezone(timezone.utc)
+    end = datetime(nxt.year, nxt.month, nxt.day, tzinfo=tz).astimezone(timezone.utc)
+    return min((end - start) // timedelta(hours=1), 24)
+
+
 GAP_LOOKBACK_DAYS = 14   # how far back a tick re-requests a day it never stored
 
 
@@ -546,10 +556,19 @@ def tick(*, market: Market | None = None, fetch=None, today: date | None = None,
         key = (target, rec["strategy"], rec["strategy_version"])
         if key in settled_keys:
             continue
-        actual = day_profile(prices, date.fromisoformat(target))
-        if len(actual) < MIN_BASIS_HOURS or not all(
+        target_day = date.fromisoformat(target)
+        actual = day_profile(prices, target_day)
+        # The WHOLE day must be in before it settles: the oracle and the regime
+        # telemetry are functions of every hour, not just the receipt's four.
+        # The old guard (>= 23 hours, a tolerance meant for the spring-DST day)
+        # also passed a day still missing its last hour — which is PT every
+        # day: Lisbon's hour 23 belongs to the NEXT CET auction day and arrives
+        # ~24h after hours 0-22. PT 2026-10-09 settled on 23 of 24 hours; hour
+        # 23 then came in as the 2nd-dearest, so the stored oracle is 0.20 EUR
+        # low for good (the ledger is append-only). Incident 2026-11-10.
+        if len(actual) < expected_hours(target_day, market.tz) or not all(
                 h in actual for h in rec["buy_hours"] + rec["sell_hours"]):
-            continue   # not published yet (or DST removed an hour we chose)
+            continue   # not fully published yet (or DST removed an hour we chose)
         oracle_buy, oracle_sell = pick_hours(actual)
         entry = {
             "target": target,

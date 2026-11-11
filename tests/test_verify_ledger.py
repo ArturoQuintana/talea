@@ -380,3 +380,126 @@ def test_unsettled_receipt_with_a_hole_in_the_dataset_is_flagged(market):
     _write(market, [rec], [], prices=partial + later)
     rep = vl.verify_market("es", verify_ots=False)
     assert any("HOLE" in w and "12 hour(s)" in w for w in rep.warns), rep.warns
+
+
+# ---- disclosed exceptions (incident 2026-11-10, PT 2026-10-09) ----------------
+
+def _stale_oracle(market, delta=-0.2):
+    """A faithful row whose stored oracle is `delta` off — the shape a settlement
+    on an incomplete day leaves behind (capture consistent with the STORED oracle)."""
+    _, entry = _faithful(market)
+    true_oracle = entry["oracle_pnl_eur"]
+    entry["oracle_pnl_eur"] = round(true_oracle + delta, 2)
+    entry["capture"] = round(entry["pnl_eur"] / entry["oracle_pnl_eur"], 3)
+    (market / "ledger.jsonl").write_text(json.dumps(entry) + "\n")
+    return entry, true_oracle
+
+
+def _exception(monkeypatch, ledger, rederived):
+    monkeypatch.setattr(vl, "KNOWN_ORACLE_EXCEPTIONS", {
+        ("es", TARGET): {"ledger": ledger, "rederived": rederived, "why": "test"}})
+
+
+def test_stale_oracle_fails_without_a_disclosed_exception(market):
+    """The detector that went red on 2026-10-09 must stay a detector."""
+    _stale_oracle(market)
+    rep = vl.verify_market("es", verify_ots=False)
+    assert any("oracle re-derived" in f for f in rep.fails), rep.fails
+
+
+def test_disclosed_exception_passes_only_its_exact_discrepancy(market, monkeypatch):
+    """An append-only ledger cannot be corrected, so the ONE documented
+    discrepancy is printed as KNOWN instead of failing forever — but the entry
+    pins both values, so it excuses nothing else on those rows."""
+    entry, true_oracle = _stale_oracle(market)
+    _exception(monkeypatch, entry["oracle_pnl_eur"], true_oracle)
+    rep = vl.verify_market("es", verify_ots=False)
+    assert rep.fails == [], rep.fails
+    assert len(rep.known) == 1 and "re-derived" in rep.known[0]
+
+    # a DIFFERENT oracle value on the same row is not covered
+    _stale_oracle(market, delta=-0.5)
+    rep = vl.verify_market("es", verify_ots=False)
+    assert any("does not cover this" in f for f in rep.fails), rep.fails
+    assert rep.known == []
+
+
+def test_disclosed_exception_does_not_shield_the_rest_of_the_row(market, monkeypatch):
+    """pnl, prices and capture are still re-derived on an excepted row: a
+    tampered P&L must fail exactly as it does anywhere else."""
+    entry, true_oracle = _stale_oracle(market)
+    _exception(monkeypatch, entry["oracle_pnl_eur"], true_oracle)
+    entry["pnl_eur"] = round(entry["pnl_eur"] + 5.0, 2)
+    (market / "ledger.jsonl").write_text(json.dumps(entry) + "\n")
+    rep = vl.verify_market("es", verify_ots=False)
+    assert any("pnl re-derived" in f for f in rep.fails), rep.fails
+    # ...and so must a capture that disagrees with the row's own stored oracle
+    entry, true_oracle = _stale_oracle(market)
+    entry["capture"] = round(entry["capture"] + 0.01, 3)
+    (market / "ledger.jsonl").write_text(json.dumps(entry) + "\n")
+    rep = vl.verify_market("es", verify_ots=False)
+    assert any("capture" in f for f in rep.fails), rep.fails
+
+
+def test_stale_exception_entry_fails(market, monkeypatch):
+    """The list cannot rot: an entry whose rows re-derive cleanly (or do not
+    exist) is itself a FAIL, so it has to be removed rather than left as a
+    standing licence."""
+    entry, _ = _faithful(market)
+    _exception(monkeypatch, 1.0, 2.0)
+    rep = vl.verify_market("es", verify_ots=False)
+    assert any("does not cover this" in f for f in rep.fails), rep.fails
+    _write(market, [], [])                                  # no settled row at all
+    (market / "receipts.jsonl").write_text(json.dumps(
+        {"target": "2026-01-09", "basis_day": "2026-01-08", "buy_hours": [0, 1],
+         "sell_hours": [22, 23], "strategy": "s", "strategy_version": "1",
+         "params": PARAMS, "committed_at": "2026-01-08T09:00:00+00:00"}) + "\n")
+    rep = vl.verify_market("es", verify_ots=False)
+    assert any("remove the stale entry" in f for f in rep.fails), rep.fails
+
+
+def test_the_exception_list_is_exactly_the_documented_one():
+    """Adding an exception is a governance act, not a one-line edit: this pins
+    the list, so a new entry must change this test too — and needs its own row
+    in docs/incidents.md saying why the ledger cannot re-derive."""
+    assert set(vl.KNOWN_ORACLE_EXCEPTIONS) == {("pt", "2026-10-09")}
+    row = [l for l in (Path(__file__).resolve().parents[1] / "docs" / "incidents.md")
+           .read_text().splitlines() if l.startswith("| 2026-11-10")]
+    assert row and "KNOWN_ORACLE_EXCEPTIONS" in row[0], \
+        "docs/incidents.md must carry the 2026-11-10 row that documents the exception"
+
+
+def test_real_exception_reports_known_and_keeps_the_market_clean(market, monkeypatch, capsys):
+    """End to end on the real table's shape: main() prints the KNOWN line, counts
+    it in the status line, and still exits 0."""
+    entry, true_oracle = _stale_oracle(market)
+    _exception(monkeypatch, entry["oracle_pnl_eur"], true_oracle)
+    monkeypatch.setattr("sys.argv", ["verify_ledger.py", "--market", "es"])
+    assert vl.main() == 0
+    out = capsys.readouterr().out
+    assert "KNOWN" in out and "1 disclosed exception(s)" in out and "ALL CHECKS PASSED" in out
+
+
+# ---- "fully published" must not mistake a day missing its last hour -----------
+
+def test_fully_published_needs_the_last_hour():
+    full = {h: 1.0 for h in range(24)}
+    assert vl.fully_published(full)
+    assert vl.fully_published({h: p for h, p in full.items() if h != 2})      # spring DST
+    assert not vl.fully_published({h: p for h, p in full.items() if h != 23})  # PT preview
+    assert not vl.fully_published({h: p for h, p in full.items() if h != 0})
+    assert not vl.fully_published({h: 1.0 for h in range(12)})
+
+
+def test_open_receipt_on_a_day_missing_its_last_hour_is_not_called_published(market):
+    """PT every afternoon: hours 0-22 of tomorrow are in, hour 23 is a day away,
+    and the loop (correctly) has not settled. That is not 'fully published but
+    UNSETTLED' — warning on it would cry wolf on every run."""
+    rec, _ = _faithful(market)
+    preview = [p for p in _day_prices() if not p["ts"].startswith(f"{TARGET}T23")]
+    _write(market, [rec], [], prices=preview)
+    rep = vl.verify_market("es", verify_ots=False)
+    assert rep.fails == [] and not any("fully published" in w for w in rep.warns), rep.warns
+    _write(market, [rec], [])                               # all 24 in, still unsettled
+    rep = vl.verify_market("es", verify_ots=False)
+    assert any("fully published but UNSETTLED" in w for w in rep.warns), rep.warns

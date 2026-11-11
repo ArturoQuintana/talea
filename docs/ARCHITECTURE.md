@@ -42,8 +42,11 @@ day-ahead source is a user decision (escalated 2026-09-07).
 Two writers, not one: the server writes ES/DE/IT/PT/FR/GB; ERCOT and JP are driven from
 GitHub Actions runners (ERCOT DAM geo-blocks EU IPs; JEPX publishes ~10:10 JST,
 the European night). Both push directly to
-`main`; the `main-protection` ruleset blocks force-push and branch deletion so
-the append-only trail cannot be rewritten. IT/PT/FR are private because ENTSO-E
+`main` of the private ledger repository; its `main-protection` ruleset blocks
+force-push and branch deletion there, so the append-only trail cannot be
+rewritten at its source. The public mirror, a copy pushed from it, carries the
+same two rules of its own since 2026-11-11, with no bypass; before that date it
+had none. IT/PT/FR are private because ENTSO-E
 day-ahead is not freely redistributable (derived-metrics-only if ever
 published); ES, DE, GB, and ERCOT are PUBLIC — all four on ONE Talea mirror repo (one project, each market a first-class page + Data/<slug>/ under it; render_dashboard.py --site, registry-derived deny-by-default allowlist). JP stays private (silent-first) pending its JEPX-licence confirmation. Historical
 cross-market capture is in docs/backtest-markets-2026-08.md.
@@ -196,7 +199,8 @@ library. See docs/market-plugin-refactor-plan.md.
     CI (GitHub Actions, on push/PR):
       pytest under a COVERAGE GATE  +  verify_ledger.py --all (re-derives EVERY
       market's ledger; a discrepancy fails the build). See "Test suite" below.
-    Branch protection:  main-protection ruleset — force-push + deletion blocked.
+    Branch protection:  main-protection rulesets — force-push + deletion blocked on
+      the private ledger repository and, since 2026-11-11, on the public mirror.
     Independent re-derivation (anyone can run it):
       scripts/verify_ledger.py --all [--verify-ots]  — recomputes every
       settlement from raw prices + each receipt's own params (imports nothing

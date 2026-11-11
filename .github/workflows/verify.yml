@@ -15,8 +15,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
+      # Same interpreter as the writers: uv reads the repo's .python-version.
+      # NOT actions/setup-python — it has no build of that exact version for the
+      # current runner image (found 2026-11-11, before this job was published).
+      # The verifier itself stays stdlib-only: `python3 scripts/verify_ledger.py
+      # --all` works on any Python 3.11+ you have.
+      - uses: astral-sh/setup-uv@v5
       - name: Independently re-derive the ledger from raw prices + receipts
-        run: python3 scripts/verify_ledger.py --all
+        run: uv run --no-project python scripts/verify_ledger.py --all
