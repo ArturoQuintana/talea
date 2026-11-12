@@ -12,7 +12,9 @@ numbers reconcile; you can run the identical command yourself (see [VERIFY.md](V
 
 This repository is the public, auditable record of a paper-trading experiment on
 several day-ahead electricity markets. Every day, BEFORE each market's auction
-publishes tomorrow's prices, a set of pre-registered strategies commits receipts
+publishes tomorrow's prices (in Great Britain, where the feed is not an auction:
+before any price for the target day exists — see the GB note in
+[VERIFY.md](VERIFY.md)), a set of pre-registered strategies commits receipts
 simulating a 1 MW / 2 MWh battery (buy the 2 cheapest hours, sell the 2 dearest;
 85% round-trip efficiency; explicit fees). Settlements against the published
 prices are appended to a ledger that is never edited.

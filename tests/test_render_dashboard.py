@@ -278,6 +278,27 @@ def test_footer_publication_time_is_per_market(monkeypatch, tmp_path):
         and "12:40-13:00 CET" in aw
 
 
+def test_gb_page_is_not_titled_day_ahead_on_any_template(monkeypatch, tmp_path):
+    """Register D-06: the GB page's <h1> and tab title said "day-ahead" above
+    its own "not the day-ahead auction" banner. On the full and the awaiting
+    template, the only "day-ahead" left on the GB page is the banner's denial;
+    other markets keep the default tab title."""
+    assert rd.MARKETS["de"]["tabtitle"] == "Germany day-ahead ledger"
+    assert rd.MARKETS["gb"]["tabtitle"] == "Great Britain Market Index ledger"
+    seeds = {
+        "full": ([_settle("2026-08-13", P, 100.0, 120.0, 0.83)],
+                 [_receipt("2026-08-13", "2026-08-12", P)]),
+        "awaiting": ([], [_receipt("2026-08-13", "2026-08-12", P)]),
+    }
+    for name, (ledger, receipts) in seeds.items():
+        _seed(monkeypatch, tmp_path / name, "gb", ["2026-08-12"], ledger, receipts)
+        html = rd.build("gb")
+        assert "<title>Great Britain Market Index ledger</title>" in html, name
+        assert "settled on the Elexon Market Index</h1>" in html, name
+        rest = html.replace("not the GB day-ahead auction", "")
+        assert "day-ahead" not in rest.lower(), name
+
+
 def test_market_disclosure_note_renders_on_every_template(monkeypatch, tmp_path):
     """Audit finding F2 (2026-09-07): GB settles against the Elexon Market Index
     — a traded within-day index that arrives progressively, not a day-ahead

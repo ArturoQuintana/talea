@@ -70,3 +70,21 @@ def test_gb_discloses_its_within_day_index_feed():
     note = reg.MARKETS["gb"].presentation.note
     assert "Market Index" in note and "not the GB day-ahead auction" in note
     assert "Persistence v1" in note and "never commit" in note
+
+
+def test_a_market_that_disclaims_the_day_ahead_auction_is_not_titled_day_ahead():
+    """Register D-06 (raised 2026-09-07, corrected 2026-11-11): the GB page was
+    titled "GB day-ahead battery arbitrage", and its tab "Great Britain
+    day-ahead ledger", directly above its own banner saying the feed is NOT the
+    day-ahead auction. Class rule: a market whose disclosure says that may not
+    use "day-ahead" in its page title or tab title — which needs an explicit
+    tab title, because the default one says "day-ahead"."""
+    disclaiming = [m for m in reg.MARKETS.values()
+                   if "not the" in m.presentation.note
+                   and "day-ahead auction" in m.presentation.note]
+    assert [m.slug for m in disclaiming] == ["gb"]
+    for m in disclaiming:
+        p = m.presentation
+        assert "day-ahead" not in p.title.lower(), m.slug
+        assert p.tab_title and "day-ahead" not in p.tab_title.lower(), m.slug
+        assert "Market Index" in p.title and "Market Index" in p.tab_title

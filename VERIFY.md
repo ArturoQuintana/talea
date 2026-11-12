@@ -75,6 +75,11 @@ Not every market carries the same strength of evidence yet; stated plainly:
   the receipt predates every price it is judged against — but "day-ahead" here
   means "committed the day before, settled on an ex-post traded index", which
   a skeptic should weigh differently from ES/DE/ERCOT's auction clearing prices.
+  The index is also a volume-weighted average of trades in each half hour, so
+  section 4's assumption that a 1 MW order executes at the settlement price
+  does not carry over to GB: no single trade need have happened at that price.
+  The GB page is titled for what it is (Market Index, not day-ahead) since
+  2026-11-11; before that its title said "day-ahead" above this disclosure.
   (2) *The primary strategy never commits in GB, by construction.* Persistence
   needs yesterday's COMPLETE 24-hour profile at the pre-deadline tick; under
   this feed today's hours are still arriving, so `battery-2h2h-persistence`
@@ -103,6 +108,43 @@ anchoring that manifest in Bitcoin. Verify with the open-source client:
 
 (Proofs are stamped daily and upgraded to Bitcoin-anchored weekly; a
 just-created proof may still be "pending" — re-run `ots upgrade` later.)
+
+**What time the strong check proves (measured 2026-11-11).** `ots verify` shows
+the manifest existed when its Bitcoin block was mined, and that block is mined
+some time AFTER the stamp is submitted. Until this date nobody had measured the
+gap (a red-team review raised it on 2026-10-01). `scripts/ots_block_lag.py`
+measures it from the audit files: for each receipt it finds the manifests that
+cover it (a manifest's receipts hash equals the hash of a line-prefix of
+today's file), takes the earliest Bitcoin block among their proofs, and
+compares that block's time with the instant the receipt must predate. Over
+every target day committed since stamping began and anchored so far:
+
+| Market | Must predate | Target days | Commit to block: median / longest | Block at or after that instant | Block under 1 h before it | Tightest margin otherwise |
+|---|---|---|---|---|---|---|
+| ES | 13:15 Madrid | 92 (2026-08-09 to 2026-11-08) | 21 min / 16.1 h | 1 | 2 | 28 min |
+| DE | 12:40 Berlin | 73 (2026-08-28 to 2026-11-08) | 22 min / 5.5 h | 2 | 17 | 14 min |
+| ERCOT | 13:30 Chicago | 65 (2026-08-28 to 2026-11-04) | 20 min / 2.3 h | 0 | 0 | 3.3 h |
+| GB | start of the target day, London | 70 (2026-08-31 to 2026-11-08) | 21 min / 1.8 h | 0 | 0 | 12.2 h |
+
+- **Three receipts' blocks came too late for the strong check.** ES target
+  2026-08-09 (committed 2026-08-08, the first day of stamping: its block was
+  mined 14.1 h after publication). DE target 2026-08-28 (the first day of DE
+  stamping: 3.8 h after). DE target 2026-10-11 (block at 10:47 UTC, seven
+  minutes after the nominal 12:40 Berlin). For these three the Bitcoin anchor
+  alone does not show the receipt predates its prices. The DE 2026-10-11
+  receipt is still covered by the weak check (its push time on this mirror);
+  the other two predate this mirror's per-tick history (below), so nothing in
+  this repository corroborates them.
+- **Margins under an hour are not proof either way.** A block's time is set by
+  its miner and only loosely bound to real time (consensus tolerates about two
+  hours ahead), and the publication times used here are nominal. Germany has
+  17 such days and Spain 2; a margin of hours, as on the remaining days and on
+  every ERCOT and GB day, is solid.
+- **Receipts committed before a market's first manifest** have no
+  pre-publication anchor at all and cannot get one (next paragraph).
+- Re-run it yourself: `python3 scripts/ots_block_lag.py --rows`. It needs
+  network access to a public block explorer and fails if it finds a late
+  anchor not listed here.
 
 **Evidence boundaries, stated plainly.** This public mirror was created on
 2026-08-10: days before that date entered it in one bulk commit, so the

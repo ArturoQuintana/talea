@@ -72,6 +72,17 @@ what it is corrected for:
 5. **Forward only.** Nothing settled before the amendment decides an
    exploratory comparison, whatever it shows.
 
+**Reporting note for the confirmatory comparison** (written 2026-11-11, when it
+stood at 83 of its 90 non-tied days; in force from the commit that published
+it). It changes no rule: the verdict is decided on the booked P&L as registered.
+The published verdict will also give, labelled "not pre-registered — decides
+nothing", wins, ties and losses for the same 90 days on the executable P&L
+(VERIFY.md section 4, daily-reset reading), and no claim will be made from
+them. If the bar is not met, persistence stays the primary in Spain and the
+owner will not promote climatology by discretion: it can become primary only
+under a rule pre-registered afterwards and decided on days settled after that
+rule. If the bar is met, promotion follows rule 4 with no discretion.
+
 Every verdict is recomputed by the statistical referee (below) before it is
 acted on or published. To reproduce: `python scripts/compare_strategies.py`
 prints the counts; with `--decision-look` it prints `p_eff`, each market's

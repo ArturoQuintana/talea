@@ -49,6 +49,7 @@ def _presentation_config() -> dict[str, dict]:
         out[slug] = {"data": m.prices_path.parent, "title": p.title,
                      "tzlabel": p.tz_label, "tz": m.tz, "gate": p.show_gate,
                      "source": p.source, "tab": p.tab_name,
+                     "tabtitle": p.tab_title or f"{p.tab_name} day-ahead ledger",
                      "currency": m.currency,
                      "publication": p.publication, "note": p.note}
     return out
@@ -227,7 +228,7 @@ def _open_cards(receipts: list[dict], settled_keys: set) -> list[str]:
 
 def _page_head(slug: str, cfg: dict, now: datetime) -> str:
     asof = now.strftime(f"%Y-%m-%d %H:%M {cfg['tzlabel']}")
-    return f"""{BASE_TOKENS}<title>{cfg['tab']} day-ahead ledger</title>
+    return f"""{BASE_TOKENS}<title>{cfg['tabtitle']}</title>
 <div class="wrap">
   <header>
     <p class="eyebrow"><a href="index.html">Talea</a> · {slug.upper()}</p>
@@ -487,7 +488,7 @@ def build(slug: str = "es", now: datetime | None = None) -> str:
         gate_section = ""
 
     return TEMPLATE % {
-        "tabtitle": cfg["tab"] + " day-ahead ledger",
+        "tabtitle": cfg["tabtitle"],
         "title": cfg["title"],
         "cur": cur, "curcode": curcode,
         "source": cfg.get("source", "apidatos.ree.es"),

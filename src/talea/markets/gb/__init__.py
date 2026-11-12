@@ -41,8 +41,11 @@ MARKET = Market.make("gb", "Europe/London", fetch_hourly,
                      deadline_hour=11, currency="GBP",
                      public=True, redistributable=True,
                      presentation=Presentation(
-                         title="GB day-ahead battery arbitrage",
-                         tab_name="Great Britain", tz_label="London",
+                         title=("GB battery arbitrage — committed the day "
+                                "before, settled on the Elexon Market Index"),
+                         tab_name="Great Britain",
+                         tab_title="Great Britain Market Index ledger",
+                         tz_label="London",
                          source="Elexon BMRS Market Index (Insights, open data)",
                          publication=("the first Market Index price for the "
                                       "target day exists (the index populates "

@@ -95,6 +95,11 @@ class Presentation:
     the hardcoded dict that used to live in render_dashboard (Phase 0)."""
     title: str = ""
     tab_name: str = ""
+    # The browser-tab title. Empty = "<tab_name> day-ahead ledger". Set it where
+    # "day-ahead" would misdescribe the feed: GB settles on a within-day index,
+    # and its page said "day-ahead" in the title above its own banner saying it
+    # is not (register D-06, corrected 2026-11-11).
+    tab_title: str = ""
     tz_label: str = ""
     source: str = ""
     show_gate: bool = False

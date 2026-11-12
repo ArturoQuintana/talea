@@ -3,6 +3,7 @@
 submitted to OpenTimestamps, so 13 dates' Bitcoin anchor covers only an
 earlier, partial intra-day state. scripts/audit_ots_manifests.py must flag
 any written-but-unstamped manifest so this class never goes unnoticed again.
+Since 2026-11-11 it must do so in every market's Data/<slug>/ots, not ES alone.
 """
 import importlib.util
 import sys
@@ -46,26 +47,104 @@ def test_fully_stamped_directory_has_no_gaps(tmp_path):
     assert gaps == []
 
 
-def test_main_no_ots_dir_is_clean(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr(audit_ots_manifests, "OTS_DIR", tmp_path / "absent")
+def test_manifest_dated_after_utc_today_is_exempt(tmp_path):
+    """A market ahead of UTC (JP) names its manifest for a day UTC has not
+    reached yet; it is as fresh as today's and may still be stamped."""
+    (tmp_path / "2026-11-12.txt").write_text("JP, written 15:13 UTC on 11-11\n")
+    (tmp_path / "2026-11-10.txt").write_text("yesterday, never stamped\n")
+
+    gaps = audit_ots_manifests.find_unstamped(tmp_path, today="2026-11-11")
+
+    assert gaps == ["2026-11-10.txt"]
+
+
+# --- T-05 (2026-11-11): the audit ran on ES only; every market stamps ---
+
+def _market(data, slug, stamped=(), unstamped=(), receipts=True, ots=True):
+    d = data / slug
+    d.mkdir(parents=True)
+    if receipts:
+        (d / "receipts.jsonl").write_text("{}\n")
+    if ots:
+        (d / "ots").mkdir()
+        for name in stamped:
+            (d / "ots" / name).write_text("state\n")
+            (d / "ots" / f"{name}.ots").write_bytes(b"proof")
+        for name in unstamped:
+            (d / "ots" / name).write_text("never stamped\n")
+
+
+def test_gap_in_a_market_other_than_es_is_found(tmp_path):
+    """The class T-05 closes: ES clean, another market holding an unstamped
+    manifest. The ES-only audit reported this tree as clean."""
+    _market(tmp_path, "es", stamped=["2026-11-01.txt"])
+    _market(tmp_path, "gb", stamped=["2026-11-01.txt"], unstamped=["2026-11-02.txt"])
+    _market(tmp_path, "jp", stamped=["2026-11-01.txt"])
+
+    gaps, unanchored = audit_ots_manifests.audit_markets(tmp_path, "2026-11-11")
+
+    assert gaps == {"es": [], "gb": ["2026-11-02.txt"], "jp": []}
+    assert unanchored == []
+
+
+def test_es_allowlist_does_not_excuse_the_same_name_in_another_market(tmp_path):
+    name = RATIFIED[0]
+    _market(tmp_path, "es", unstamped=[name])
+    _market(tmp_path, "de", unstamped=[name])
+
+    gaps, _ = audit_ots_manifests.audit_markets(tmp_path, "2026-11-11")
+
+    assert gaps == {"de": [name], "es": []}
+
+
+def test_market_with_receipts_but_no_ots_directory_is_flagged(tmp_path):
+    _market(tmp_path, "es", stamped=["2026-11-01.txt"])
+    _market(tmp_path, "nl", ots=False)                      # receipts, never anchored
+    _market(tmp_path, "calibration", receipts=False, ots=False)   # not a market
+    (tmp_path / "OTS-GAPS.log").write_text("a file, not a directory\n")
+
+    gaps, unanchored = audit_ots_manifests.audit_markets(tmp_path, "2026-11-11")
+
+    assert gaps == {"es": []}
+    assert unanchored == ["nl"]
+
+
+def test_main_no_data_dir_is_clean(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(audit_ots_manifests, "DATA_DIR", tmp_path / "absent")
     assert audit_ots_manifests.main() == 0
     assert "absent" in capsys.readouterr().out
 
 
-def test_main_all_stamped_returns_zero(tmp_path, monkeypatch, capsys):
-    (tmp_path / "2020-01-01.txt").write_text("state\n")       # past date, not today
-    (tmp_path / "2020-01-01.txt.ots").write_bytes(b"proof")
-    monkeypatch.setattr(audit_ots_manifests, "OTS_DIR", tmp_path)
+def test_main_all_stamped_returns_zero_and_names_the_markets(tmp_path, monkeypatch, capsys):
+    _market(tmp_path, "es", stamped=["2020-01-01.txt"])     # past date, not today
+    _market(tmp_path, "gb", stamped=["2020-01-01.txt"])
+    monkeypatch.setattr(audit_ots_manifests, "DATA_DIR", tmp_path)
     assert audit_ots_manifests.main() == 0
-    assert "every non-today manifest is stamped" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "2 market(s) checked (es, gb)" in out
+    assert "every manifest dated before today is stamped" in out
 
 
-def test_main_reports_gaps_and_returns_one(tmp_path, monkeypatch, capsys):
-    (tmp_path / "2020-01-01.txt").write_text("never stamped\n")   # no .ots sibling
-    monkeypatch.setattr(audit_ots_manifests, "OTS_DIR", tmp_path)
+def test_main_reports_gaps_with_their_market_and_returns_one(tmp_path, monkeypatch, capsys):
+    _market(tmp_path, "es", stamped=["2020-01-01.txt"])
+    _market(tmp_path, "pt", unstamped=["2020-01-01.txt"])   # no .ots sibling
+    monkeypatch.setattr(audit_ots_manifests, "DATA_DIR", tmp_path)
     assert audit_ots_manifests.main() == 1
     out = capsys.readouterr().out
-    assert "written but never stamped" in out and "2020-01-01.txt" in out
+    assert "1 manifest(s) written but never stamped" in out
+    assert "Data/pt/ots/2020-01-01.txt" in out
+    assert "Data/es/" not in out
+
+
+def test_main_reports_an_unanchored_market_and_returns_one(tmp_path, monkeypatch, capsys):
+    _market(tmp_path, "es", stamped=["2020-01-01.txt"])
+    _market(tmp_path, "nl", ots=False)
+    monkeypatch.setattr(audit_ots_manifests, "DATA_DIR", tmp_path)
+    assert audit_ots_manifests.main() == 1
+    out = capsys.readouterr().out
+    assert "1 market(s) with receipts but no ots/ directory" in out
+    assert "Data/nl/" in out
+    assert "never stamped" not in out
 
 
 # --- infra-audit 2026-11-01 F3: the alarm was saturated by the ratified gap ---

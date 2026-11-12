@@ -40,7 +40,8 @@ GREEN = [_run("success", "2026-11-11T00:20:00Z", "d" * 40)] + RED_32_DAYS
 class FakeGitHub:
     def __init__(self, runs, issue=None):
         self.runs, self.issue, self.log = runs, issue, []
-    def ci_runs(self):
+    def workflow_runs(self, workflow, repo=None):
+        self.read = (workflow, repo)
         return self.runs
     def open_issue(self, title):
         return self.issue if self.issue and self.issue["title"] == title else None
@@ -211,6 +212,7 @@ def test_github_client_speaks_the_expected_rest_calls():
         return Resp(b"")
     gh = rma.GitHub("o/r", "tok", api="https://api.example.test", _open=fake_open)
     assert gh.ci_runs() == [{"conclusion": "success"}]
+    assert gh.workflow_runs("ci.yml") == [{"conclusion": "success"}]
     assert gh.open_issue(rma.TITLE)["number"] == 3 and gh.open_issue("nope") is None
     assert gh.create_issue("t", "b", "owner")["number"] == 9
     gh.comment(9, "c"); gh.close(9)
@@ -222,15 +224,103 @@ def test_github_client_speaks_the_expected_rest_calls():
 
 def test_main_reads_the_workflow_environment(monkeypatch):
     seen = {}
-    def fake_run(gh, env, *, event, drill=False):
+    def fake_run(gh, env, *, event, drill=False, target=None, watch_repo=None):
         seen.update(repo=gh.repo, event=event, drill=drill)
+        seen["target"], seen["watch_repo"] = target, watch_repo
         return 0
     monkeypatch.setattr(rma, "run", fake_run)
     monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
     monkeypatch.setenv("GITHUB_TOKEN", "tok")
     monkeypatch.setenv("GITHUB_EVENT_NAME", "schedule")
-    assert rma.main([]) == 0 and seen == {"repo": "o/r", "event": "schedule", "drill": False}
+    assert rma.main([]) == 0 and seen == {"repo": "o/r", "event": "schedule", "drill": False,
+                                          "target": rma.CI, "watch_repo": None}
     assert rma.main(["--drill"]) == 0 and seen["drill"] is True
+    assert rma.main(["--target", "mirror-verify", "--repo", "o/mirror"]) == 0
+    assert seen["target"] is rma.MIRROR_VERIFY and seen["watch_repo"] == "o/mirror"
+    assert seen["repo"] == "o/r", "the issue is still filed in the workflow's own repo"
+    with pytest.raises(SystemExit):
+        rma.main(["--target", "mirror-verify"])      # no mirror named: refuse, do not guess
+
+
+# --- the second target: the public mirror's verify run (D-10, 2026-11-11) ---
+
+def _go_mirror(gh, event, **kw):
+    return _go(gh, event, target=rma.MIRROR_VERIFY, watch_repo="o/mirror", **kw)
+
+
+def test_a_red_public_verify_run_opens_its_own_issue_and_emails():
+    gh = FakeGitHub(RED_32_DAYS)
+    assert _go_mirror(gh, "workflow_run") == 0
+    assert gh.read == ("verify.yml", "o/mirror"), "must read the MIRROR's verify runs"
+    assert gh.log == [("create", rma.MIRROR_VERIFY.title, "owner")]
+    msg = FakeSMTP.sent[0]
+    assert msg["Subject"] == "talea public verify RED on the mirror — ccccccc"
+    assert "public mirror's verify run is failing" in msg.get_content()
+    assert "CI on main" not in msg.get_content()
+
+
+def test_the_two_targets_do_not_share_an_issue():
+    """A red CI issue being open must not make a red verify run look already
+    reported (and the reverse): each target finds only its own title."""
+    ci_issue = {"number": 3, "title": rma.CI.title, "html_url": "https://example.test/issues/3"}
+    gh = FakeGitHub(RED_32_DAYS, issue=ci_issue)
+    assert _go_mirror(gh, "workflow_run") == 0
+    assert gh.log[0] == ("create", rma.MIRROR_VERIFY.title, "owner")
+    assert rma.MIRROR_VERIFY.title != rma.CI.title
+
+
+def test_public_verify_repeats_daily_and_heals_like_ci():
+    issue = {"number": 7, "title": rma.MIRROR_VERIFY.title, "html_url": "https://example.test/issues/7"}
+    gh = FakeGitHub(RED_32_DAYS, issue=dict(issue))
+    assert _go_mirror(gh, "workflow_run") == 0 and gh.log == [] and FakeSMTP.sent == []
+    assert _go_mirror(gh, "schedule") == 0
+    assert gh.log[0][0] == "comment"
+    body = FakeSMTP.sent[0].get_content()
+    assert "STILL failing — day 31" in body and "README badge shows failing" in body
+    assert "resolver PR" not in body
+    gh2 = FakeGitHub(GREEN, issue=dict(issue))
+    assert _go_mirror(gh2, "workflow_run") == 0
+    assert [a[0] for a in gh2.log] == ["comment", "close"]
+    assert FakeSMTP.sent[-1]["Subject"] == "talea public verify green again on the mirror — ddddddd"
+
+
+def test_ci_wording_is_unchanged_by_the_second_target():
+    gh = FakeGitHub(RED_32_DAYS)
+    assert _go(gh, "workflow_run") == 0
+    assert gh.read == ("ci.yml", None)
+    msg = FakeSMTP.sent[0]
+    assert msg["Subject"] == "talea CI RED on main — ccccccc"
+    assert msg.get_content().startswith("CI on main is failing.")
+
+
+def test_mirror_runs_are_read_without_the_token_when_github_refuses_it():
+    """The workflow's token belongs to the private repo. If GitHub refuses it on
+    the mirror, the public run list is read with no token; a refusal on the
+    workflow's OWN repo is a real error and must not be swallowed."""
+    import urllib.error
+    calls = []
+    class Resp:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return b'{"workflow_runs": [{"conclusion": "failure"}]}'
+    def fake_open(req, timeout=None):
+        authed = "Authorization" in req.headers
+        calls.append((req.full_url, authed))
+        if authed:
+            raise urllib.error.HTTPError(req.full_url, 403, "Forbidden", {}, None)
+        return Resp()
+    gh = rma.GitHub("o/r", "tok", api="https://api.example.test", _open=fake_open)
+    assert gh.workflow_runs("verify.yml", "o/mirror") == [{"conclusion": "failure"}]
+    assert [a for _, a in calls] == [True, False]
+    assert all("/repos/o/mirror/actions/workflows/verify.yml/runs" in u for u, _ in calls)
+    with pytest.raises(urllib.error.HTTPError):
+        gh.workflow_runs("ci.yml")
+
+    def server_error(req, timeout=None):
+        raise urllib.error.HTTPError(req.full_url, 500, "boom", {}, None)
+    gh500 = rma.GitHub("o/r", "tok", api="https://api.example.test", _open=server_error)
+    with pytest.raises(urllib.error.HTTPError):
+        gh500.workflow_runs("verify.yml", "o/mirror")     # not an auth refusal: do not mask it
 
 
 # --- the workflow that runs it ---
@@ -245,6 +335,16 @@ def test_red_main_workflow_is_wired_and_read_only():
     perms = text.split("permissions:", 1)[1].split("\n\n", 1)[0]
     assert "issues: write" in perms and "contents: read" in perms and "contents: write" not in text
     assert "git push" not in text and "git commit" not in text
+
+
+def test_red_main_workflow_also_watches_the_public_verify_run():
+    text = (ROOT / ".github" / "workflows" / "red-main.yml").read_text()
+    step = text.split("Report the public mirror's verify state", 1)[1]
+    assert "--target mirror-verify --repo ArturoQuintana/talea" in step
+    assert "always()" in step, "a failed CI-alert step must not silence the mirror check"
+    assert "!inputs.drill" in step, "a drill is one test email, not two reports"
+    for name in ("ALERT_SMTP_USER", "ALERT_SMTP_PASSWORD", "ALERT_EMAIL_TO"):
+        assert f"{name}: ${{{{ secrets.{name} }}}}" in step
 
 
 def test_no_address_or_credential_is_written_into_the_alert_code():
