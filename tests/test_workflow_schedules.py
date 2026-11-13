@@ -135,3 +135,24 @@ def test_every_jp_rung_commits_when_it_starts_on_time(tmp_path):
                       sleep=lambda _s: None)
         assert s["committed"], f"the {hour:02d}:{minute:02d} UTC rung ({now:%H:%M} JST) did not commit: {s['skipped']}"
         assert {r["target"] for r in s["committed"]} == {"2026-09-02"}
+
+
+# --- the origin-side liveness detector ------------------------------------------
+
+def test_origin_liveness_detector_is_scheduled():
+    """Incident 2026-11-03..09: the server's liveness check reads the SERVER's
+    clone, so a diverged clone (pushes rejected, pulls refused) was invisible to
+    it for six days. A scheduled job must run the same monitor against ORIGIN's
+    main, fail when it reports STALE, and stay read-only. It must not swallow
+    the exit code (`|| true`, a pipe) and must not use the retired phone push."""
+    text = (WORKFLOWS / "liveness.yml").read_text()
+    assert _crons("liveness.yml"), "liveness.yml must run on a schedule"
+    runs = [ln.split("run:", 1)[1].strip() for ln in text.splitlines()
+            if ln.strip().startswith(("run:", "- run:"))]
+    check = [r for r in runs if "scripts/check_liveness.py" in r]
+    assert len(check) == 1, "exactly one step runs the monitor"
+    assert "||" not in check[0] and "|" not in check[0] and "--quiet" not in check[0], (
+        "the monitor's own exit code must decide the job, and its per-market "
+        "lines must reach the run log the alert links to")
+    assert "contents: read" in text and "git push" not in text and "git commit" not in text
+    assert "ntfy" not in text.split("jobs:", 1)[1]

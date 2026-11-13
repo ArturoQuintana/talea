@@ -327,7 +327,8 @@ def test_mirror_runs_are_read_without_the_token_when_github_refuses_it():
 
 def test_red_main_workflow_is_wired_and_read_only():
     text = (ROOT / ".github" / "workflows" / "red-main.yml").read_text()
-    assert re.search(r"workflow_run:\s*\n\s*workflows: \[ci\]", text), "must run after every CI run"
+    assert re.search(r"workflow_run:\s*\n\s*workflows: \[ci, origin-liveness\]", text), \
+        "must run after every CI run and every origin-liveness run"
     assert "branches: [main]" in text
     assert re.search(r'- cron:\s*"\d+ \d+ \* \* \*"', text), "must repeat daily while red"
     assert "workflow_dispatch" in text and "--drill" in text, "must be drillable on demand"
@@ -345,6 +346,54 @@ def test_red_main_workflow_also_watches_the_public_verify_run():
     assert "!inputs.drill" in step, "a drill is one test email, not two reports"
     for name in ("ALERT_SMTP_USER", "ALERT_SMTP_PASSWORD", "ALERT_EMAIL_TO"):
         assert f"{name}: ${{{{ secrets.{name} }}}}" in step
+
+
+# --- the third target: the origin liveness run (incident 2026-11-03..09) ---
+
+def test_a_red_liveness_run_opens_its_own_issue_and_emails_what_to_look_for():
+    """The detector is a scheduled run: red, it tells nobody unless this alert
+    does. Its issue must not be confused with the CI or mirror ones, it reads
+    THIS repo's runs (no watch_repo), and the reminder says what red means."""
+    gh = FakeGitHub([_run("failure", "2026-11-13T17:41:00Z")])
+    assert _go(gh, "workflow_run", target=rma.LIVENESS) == 0
+    assert gh.log == [("create", rma.LIVENESS.title, "owner")]
+    assert gh.read == ("liveness.yml", None)
+    assert len({rma.CI.title, rma.MIRROR_VERIFY.title, rma.LIVENESS.title}) == 3
+    assert "origin liveness RED on origin" in FakeSMTP.sent[-1]["Subject"]
+    still = rma.build_email("email_still_red", {"days": 2, "failed_runs": 2},
+                            sender="a@example.test", to="b@example.test",
+                            target=rma.LIVENESS)
+    assert "the run log names it" in still.get_content()
+    assert "diverged" in still.get_content()     # the cause the server cannot see
+
+
+def test_liveness_target_is_selectable_and_reads_this_repo(monkeypatch):
+    seen = {}
+    def fake_run(gh, env, *, event, drill=False, target=None, watch_repo=None):
+        seen.update(target=target, watch_repo=watch_repo)
+        return 0
+    monkeypatch.setattr(rma, "run", fake_run)
+    monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
+    monkeypatch.setenv("GITHUB_TOKEN", "tok")
+    assert rma.main(["--target", "liveness"]) == 0
+    assert seen == {"target": rma.LIVENESS, "watch_repo": None}
+    assert rma.LIVENESS.workflow == "liveness.yml"
+
+
+def test_red_main_workflow_also_reports_the_liveness_run():
+    """Both halves of the wiring: red-main must be TRIGGERED by the detector's
+    runs (its `name:` must match the workflow_run list) and must have a step
+    that reads them. Either half missing and a stale origin alerts nobody."""
+    wf = ROOT / ".github" / "workflows"
+    name = re.search(r"^name:\s*(\S+)", (wf / "liveness.yml").read_text(), re.M).group(1)
+    text = (wf / "red-main.yml").read_text()
+    listed = re.search(r"workflow_run:\s*\n\s*workflows: \[([^\]]*)\]", text).group(1)
+    assert name in [w.strip() for w in listed.split(",")]
+    step = text.split("Report the origin liveness state", 1)[1]
+    assert "--target liveness" in step
+    assert "always()" in step and "!inputs.drill" in step
+    for secret in ("ALERT_SMTP_USER", "ALERT_SMTP_PASSWORD", "ALERT_EMAIL_TO"):
+        assert f"{secret}: ${{{{ secrets.{secret} }}}}" in step
 
 
 def test_no_address_or_credential_is_written_into_the_alert_code():

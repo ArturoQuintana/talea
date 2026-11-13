@@ -25,6 +25,12 @@ credentials. `--target mirror-verify --repo OWNER/MIRROR` reads the mirror's run
 and files the issue HERE, in the repo this workflow runs in. Same rules: first
 red opens and emails, the daily schedule repeats, first green closes.
 
+A THIRD TARGET (2026-11-13): this repo's own `origin-liveness` run
+(.github/workflows/liveness.yml), which fails when a registered market stops
+reaching origin — the class the server cannot see from its own clone (incident
+2026-11-03..09). It is a scheduled run, so again GitHub emails nobody.
+`--target liveness` reports it; same rules.
+
 Stdlib-only, like verify_ledger.py. No address or credential lives in this file:
 ALERT_SMTP_USER / ALERT_SMTP_PASSWORD / ALERT_EMAIL_TO come from the workflow's
 secrets. Without them the email is skipped (and said so) — the issue still files.
@@ -63,7 +69,14 @@ MIRROR_VERIFY = Target(
     "on the mirror", "The public mirror's verify run", "mirror verify",
     "While it is red, the published ledger does not re-derive on GitHub and the "
     "README badge shows failing.")
-TARGETS = {"ci": CI, "mirror-verify": MIRROR_VERIFY}
+LIVENESS = Target(
+    "liveness.yml", "A market has stopped reaching origin", "origin liveness",
+    "on origin", "The origin liveness check", "origin liveness",
+    "While it is red, at least one registered market has committed nothing to "
+    "origin for two days or its newest stored price is more than two days old; "
+    "the run log names it. If the server's own digest shows that market as "
+    "fresh, the server's clone has diverged from origin (INFRA.md runbook).")
+TARGETS = {"ci": CI, "mirror-verify": MIRROR_VERIFY, "liveness": LIVENESS}
 
 TITLE = CI.title
 DRILL_TITLE = "[DRILL] CI is red on main — delivery test"
