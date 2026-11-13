@@ -7,16 +7,24 @@ Deliberately cheap: they check that each code-registered name APPEARS in the
 canonical doc, not that prose is worded a particular way. Live numbers are NOT
 checked here — those belong in the ledger/status/dashboard, never frozen in a
 doc."""
+import functools
 import re
 from pathlib import Path
 
+from conftest import private_file, published_file
 from talea.loop import STRATEGIES
 from talea.markets import MARKETS
 
 ROOT = Path(__file__).resolve().parents[1]
 ARCHITECTURE = (ROOT / "docs" / "ARCHITECTURE.md").read_text()
-CLAUDE = (ROOT / "CLAUDE.md").read_text()
-INFRA = (ROOT / "INFRA.md").read_text()
+
+
+# Files only the private repository has are read when a test asks for them, not
+# when this module is imported: on the public mirror each such test is skipped
+# on its own, with the file it needs named, and the rest of this file runs.
+@functools.cache
+def _private_text(rel: str) -> str:
+    return private_file(rel).read_text()
 
 
 def test_every_market_is_documented():
@@ -34,9 +42,11 @@ def test_every_strategy_is_documented():
     ARCHITECTURE panel and CLAUDE.md's registered panel."""
     names = [s["strategy"].replace("battery-2h2h-", "") for s in STRATEGIES]
     missing_arch = [n for n in names if n not in ARCHITECTURE]
-    missing_claude = [n for n in names if n not in CLAUDE]
     assert not missing_arch, (
         f"strategies in code but not in docs/ARCHITECTURE.md panel: {missing_arch}")
+    # ARCHITECTURE.md is published, so the half above runs on a public copy too;
+    # only what follows needs the private file (and is skipped there, by name).
+    missing_claude = [n for n in names if n not in _private_text("CLAUDE.md")]
     assert not missing_claude, (
         f"strategies in code but not in CLAUDE.md registered panel: {missing_claude}")
 
@@ -139,6 +149,7 @@ def test_infra_md_names_every_actions_driven_market():
     every market registered with driver == "actions" must be named (by
     upper-case slug) on the System map's GitHub Actions line, so a future
     market added on this driver can't silently drop off the recovery doc."""
+    INFRA = _private_text("INFRA.md")
     line = next(l for l in INFRA.splitlines() if "GitHub Actions" in l
                 and "SCHEDULERS" not in l)
     # The writer block wraps onto following indented lines until a blank one.
@@ -161,7 +172,7 @@ def test_system_map_deadline_table_matches_the_registry():
     (deadline_hour + tz label), local zone, and writer match the registry. The rest of
     the map (schedule / topology / flow / cloud-routine crons) stays auditor-guarded —
     those sources are not machine-readable in this repo, so generation can't cover them."""
-    html = (ROOT / "docs" / "system-map.html").read_text()
+    html = _private_text("docs/system-map.html")
     section = html.split("Markets — publication deadlines", 1)[1].split("Schedule —", 1)[0]
     market_rows = {}
     for inner in re.findall(r"<tr>(.*?)</tr>", section, re.S):
@@ -192,11 +203,11 @@ def test_enumerating_docs_list_every_routine_mirror():
     the single source of truth; every enumerating doc must agree with it. This
     converts "I forgot to update the count" from a recurring agent-session catch
     into a CI failure — so it's machinery-caught before commit, not an escape."""
-    routines = ROOT / "docs" / "routines"
+    routines = private_file("docs/routines")
     mirrors = [p for p in sorted(routines.glob("*.md"))
                if "## Prompt (verbatim)" in p.read_text()]
     assert len(mirrors) >= 5, "expected the standing routine mirrors to be present"
-    infra = INFRA
+    infra = _private_text("INFRA.md")
     readme = (routines / "README.md").read_text()
     for p in mirrors:
         assert p.stem in infra, (
@@ -204,7 +215,7 @@ def test_enumerating_docs_list_every_routine_mirror():
             f"map — update the MIRRORS list + the count when you add/remove a routine")
         assert p.stem in readme, (
             f"routine mirror {p.stem!r} is not named in docs/routines/README.md")
-    smap = (ROOT / "docs" / "system-map.html").read_text()
+    smap = _private_text("docs/system-map.html")
     m = re.search(r'<div class="n">(\d+)</div><div class="l">standing routines', smap)
     assert m, "docs/system-map.html must carry a '<n> standing routines' stat tile"
     assert int(m.group(1)) == len(mirrors), (
@@ -286,7 +297,7 @@ def test_every_alert_channel_states_whether_the_operator_confirmed_it():
         "email": "smtplib" in shell,
     }
     assert any(senders.values()), "no sender found — has the alert code moved?"
-    rows = _alert_channel_rows(INFRA)
+    rows = _alert_channel_rows(_private_text("INFRA.md"))
     assert not _alert_channel_problems(rows, senders), _alert_channel_problems(rows, senders)
 
     # the guard must be able to fail the way the real defect did
@@ -309,7 +320,16 @@ def test_mirror_is_deny_by_default_allowlist():
     --delete-excluded the whole mirror). Leaking a private market now requires
     flagging it public in the registry, not forgetting an exclude."""
     from talea.markets import public_markets
-    txt = (ROOT / "scripts" / "publish_mirror.sh").read_text()
+    # The list lives in ONE script, shared by the publisher and by CI.
+    txt = (ROOT / "scripts" / "mirror_tree.sh").read_text()
+    publish = "\n".join(l for l in (ROOT / "scripts" / "publish_mirror.sh").read_text().splitlines()
+                        if not l.lstrip().startswith("#"))
+    assert 'bash scripts/mirror_tree.sh "$MIRROR"' in publish, \
+        "publish_mirror.sh must build the mirror's file set with scripts/mirror_tree.sh"
+    assert not re.search(r"\b(rsync|cp)\b|--include", publish), \
+        "publish_mirror.sh must not copy anything itself: the list exists once, in mirror_tree.sh"
+    assert 'if [ -z "$SLUGS" ]' in publish, \
+        "publish_mirror.sh must skip (publish nothing) when no public market is resolved"
     assert "--exclude='*'" in txt, \
         "mirror publish must end in a deny-all --exclude='*' (allowlist posture)"
     assert "for s in $SLUGS" in txt and '--include="/$s/***"' in txt, \
@@ -384,9 +404,12 @@ def test_published_mirror_files_do_not_name_the_dead_repo():
     'spain-dayahead-ledger', a repo renamed to `talea` on 2026-08-29. Files
     copied VERBATIM onto the mirror by publish_mirror.sh must not carry the dead
     name (incidents.md is exempt: it records history)."""
-    for rel in ("mirror/verify.yml", "README-public.md", "VERIFY.md",
-                "GOVERNANCE.md", "DATA-SOURCES.md", "docs/ARCHITECTURE.md"):
-        txt = (ROOT / rel).read_text()
+    for rel, on_mirror in (("mirror/verify.yml", ".github/workflows/verify.yml"),
+                           ("README-public.md", "README.md"), ("VERIFY.md", "VERIFY.md"),
+                           ("GOVERNANCE.md", "GOVERNANCE.md"),
+                           ("DATA-SOURCES.md", "DATA-SOURCES.md"),
+                           ("docs/ARCHITECTURE.md", "docs/ARCHITECTURE.md")):
+        txt = published_file(rel, on_mirror).read_text()
         assert "spain-dayahead-ledger" not in txt, \
             f"{rel} names the dead repo 'spain-dayahead-ledger' (renamed to talea)"
 
@@ -412,7 +435,7 @@ def test_public_docs_disclose_that_pnl_does_not_enforce_dispatch_order():
     assumption only. All three must say so, and VERIFY.md must point at the
     script that measures the effect."""
     verify = (ROOT / "VERIFY.md").read_text()
-    readme = (ROOT / "README-public.md").read_text()
+    readme = published_file("README-public.md", "README.md").read_text()
     footer = (ROOT / "scripts" / "render_dashboard.py").read_text()
     for name, text in (("VERIFY.md", verify), ("README-public.md", readme),
                        ("render_dashboard.py", footer)):
@@ -431,7 +454,7 @@ def test_open_decisions_register_is_well_formed():
     digest counts OPEN `D-` rows and ages the oldest). Each row: an ID with a
     known prefix, an ISO date, OPEN or CLOSED, and — if CLOSED — what closed it."""
     from datetime import date
-    txt = (ROOT / "docs" / "open-decisions.md").read_text()
+    txt = _private_text("docs/open-decisions.md")
     rows = [[c.strip() for c in l.strip().strip("|").split("|")]
             for l in txt.splitlines() if re.match(r"\|\s*[A-Z]-\d+\s*\|", l)]
     assert len(rows) >= 10, "the register has lost its rows — has the table format changed?"
@@ -449,6 +472,7 @@ def test_open_decisions_register_is_well_formed():
             assert where, f"{rid} is CLOSED but does not say what closed it"
     assert any(r[0].startswith("D-") and r[2] == "OPEN" for r in rows) or "D-" not in txt
     # private: it names findings and people's pending decisions; never mirrored
+    assert "open-decisions.md" not in (ROOT / "scripts" / "mirror_tree.sh").read_text()
     assert "open-decisions.md" not in (ROOT / "scripts" / "publish_mirror.sh").read_text()
 
 
@@ -461,7 +485,7 @@ def test_policy_carries_amendment_1_as_ratified():
     file actually in the repo, or the frozen bar has moved without a ratification."""
     import hashlib
     flat = lambda text: re.sub(r"\s+", " ", re.sub(r"(?m)^> ?", "", text))   # ignore wrapping
-    pol = (ROOT / "docs" / "multiple-comparisons-policy.md").read_text()
+    pol = _private_text("docs/multiple-comparisons-policy.md")
     amend = flat(pol.split("## Amendment 1", 1)[1])
     assert "I ratify the draft as written, executable P&L deferred" in amend
     for n in range(1, 9):
@@ -471,7 +495,7 @@ def test_policy_carries_amendment_1_as_ratified():
     digest = hashlib.sha256((ROOT / "Data" / "calibration" / "sign_bar.json").read_bytes()).hexdigest()
     assert digest in amend, ("Data/calibration/sign_bar.json no longer matches the hash recorded "
                              "in Amendment 1 — changing the frozen calibration is user-gated")
-    claude = flat((ROOT / "CLAUDE.md").read_text())
+    claude = flat(_private_text("CLAUDE.md"))
     assert "Amendment 1" in claude and "0.05/12" in claude and "2026-11-11T03:30:00Z" in claude
-    prop = (ROOT / "docs" / "proposals" / "comparison-rules-amendment-2026-11.md").read_text()
+    prop = _private_text("docs/proposals/comparison-rules-amendment-2026-11.md")
     assert "STATUS: RATIFIED" in prop and "NOT IN FORCE" not in prop

@@ -19,6 +19,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from conftest import private_file
 from talea.markets import MARKETS
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -32,7 +33,7 @@ REFERENCE_DATE = (2026, 9, 1)
 def _crons(workflow_name: str) -> list[tuple[int, int]]:
     """[(hour, minute), ...] UTC for every `- cron: "M H * * *"` line in the
     named workflow file's `schedule:` block."""
-    text = (WORKFLOWS / workflow_name).read_text()
+    text = private_file(f".github/workflows/{workflow_name}").read_text()
     return [(int(h), int(m)) for m, h in
             re.findall(r'- cron:\s*"(\d{1,2})\s+(\d{1,2})\s+\*\s+\*\s+\*"', text)]
 
@@ -145,7 +146,7 @@ def test_origin_liveness_detector_is_scheduled():
     it for six days. A scheduled job must run the same monitor against ORIGIN's
     main, fail when it reports STALE, and stay read-only. It must not swallow
     the exit code (`|| true`, a pipe) and must not use the retired phone push."""
-    text = (WORKFLOWS / "liveness.yml").read_text()
+    text = private_file(".github/workflows/liveness.yml").read_text()
     assert _crons("liveness.yml"), "liveness.yml must run on a schedule"
     runs = [ln.split("run:", 1)[1].strip() for ln in text.splitlines()
             if ln.strip().startswith(("run:", "- run:"))]

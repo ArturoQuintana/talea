@@ -12,6 +12,8 @@ import sys
 import tomllib
 from pathlib import Path
 
+from conftest import private_file, published_file
+
 ROOT = Path(__file__).resolve().parents[1]
 PIN = (ROOT / ".python-version").read_text().strip()
 
@@ -40,6 +42,7 @@ def test_every_workflow_gets_python_from_uv_and_the_pin():
     — which had no build of the pinned release for the current runner image and
     failed red-main's first run (2026-11-11); the same change was one publish
     away from breaking the public mirror's verify job."""
+    private_file(".github/workflows/ci.yml")          # the private repository's workflows
     files = sorted((ROOT / ".github" / "workflows").glob("*.yml")) + [ROOT / "mirror" / "verify.yml"]
     assert len(files) >= 5
     for f in files:
@@ -61,4 +64,14 @@ def test_every_workflow_gets_python_from_uv_and_the_pin():
 def test_the_pin_travels_to_the_public_mirror():
     """The mirror publishes the tests and tells readers to run `uv run pytest`;
     without the pin file there, that would run on whatever Python they have."""
-    assert ".python-version" in (ROOT / "scripts" / "publish_mirror.sh").read_text()
+    assert ".python-version" in (ROOT / "scripts" / "mirror_tree.sh").read_text()
+
+
+def test_the_mirrors_own_workflow_follows_the_pin_too():
+    """The one workflow the mirror does carry (verify.yml). Runs in both places:
+    in the private repository it is mirror/verify.yml, on the mirror
+    .github/workflows/verify.yml."""
+    text = published_file("mirror/verify.yml", ".github/workflows/verify.yml").read_text()
+    code = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))
+    assert "setup-python" not in code and "astral-sh/setup-uv" in code
+    assert not re.search(r"python-version:", code)

@@ -56,6 +56,22 @@ def load_settled(ledger_path: Path) -> list[dict]:
     return out
 
 
+def has_receipts(receipts_path: Path) -> bool:
+    """Has this market committed at least one receipt? The file existing is
+    not enough: a pass refused at the moment of writing leaves the file it had
+    opened, empty, and a market with an empty file has opened no ledger."""
+    if not receipts_path.exists():
+        return False
+    for line in receipts_path.read_text().splitlines():
+        if line.strip():
+            try:
+                if isinstance(json.loads(line), dict):
+                    return True
+            except json.JSONDecodeError:
+                continue
+    return False
+
+
 def window_bounds(week_end: date, window_days: int) -> tuple[str, str]:
     """Inclusive [start, end] ISO strings for the trailing window."""
     return (week_end - timedelta(days=window_days - 1)).isoformat(), week_end.isoformat()
@@ -181,7 +197,7 @@ def render_note(week_end: date, window_days: int, markets: list, cal: dict | Non
         sec, n = render_market_section(m, week_end, window_days)
         if n:
             sections.append(sec)
-        elif load_settled(m.ledger_path) or m.receipts_path.exists():
+        elif load_settled(m.ledger_path) or has_receipts(m.receipts_path):
             opened_only.append(m.presentation.tab_name or m.slug)
 
     # The standing line uses the primary (mature) market's FULL ledger — the bar

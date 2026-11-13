@@ -43,8 +43,8 @@ if [ -n "$(git status --porcelain Data)" ]; then
   git commit -m "data: weekly maintenance (route refresh + cross-check + ots upgrade)"
 fi
 
-# Sync, then push — the rebase-retry the ERCOT/JP Actions writers use (minus
-# their --autostash: a fresh Actions checkout is never dirty, this clone can be). This
+# Sync, then push — the rebase-retry the ERCOT/JP Actions writers use (like
+# theirs, without --autostash: a dirty tree must make the pull refuse). This
 # run holds the checkout for ~7 minutes (one `ots upgrade` per proof) starting
 # 11:00 UTC, inside the ERCOT ladder's usual push window, so "origin moved since
 # our pull" is the EXPECTED case here, not a rare race: a bare `git push` is

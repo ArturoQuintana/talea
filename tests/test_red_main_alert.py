@@ -13,6 +13,8 @@ from pathlib import Path
 
 import pytest
 
+from conftest import private_file
+
 ROOT = Path(__file__).resolve().parents[1]
 _SPEC = importlib.util.spec_from_file_location(
     "red_main_alert", ROOT / "scripts" / "red_main_alert.py")
@@ -326,7 +328,7 @@ def test_mirror_runs_are_read_without_the_token_when_github_refuses_it():
 # --- the workflow that runs it ---
 
 def test_red_main_workflow_is_wired_and_read_only():
-    text = (ROOT / ".github" / "workflows" / "red-main.yml").read_text()
+    text = private_file(".github/workflows/red-main.yml").read_text()
     assert re.search(r"workflow_run:\s*\n\s*workflows: \[ci, origin-liveness\]", text), \
         "must run after every CI run and every origin-liveness run"
     assert "branches: [main]" in text
@@ -339,7 +341,7 @@ def test_red_main_workflow_is_wired_and_read_only():
 
 
 def test_red_main_workflow_also_watches_the_public_verify_run():
-    text = (ROOT / ".github" / "workflows" / "red-main.yml").read_text()
+    text = private_file(".github/workflows/red-main.yml").read_text()
     step = text.split("Report the public mirror's verify state", 1)[1]
     assert "--target mirror-verify --repo ArturoQuintana/talea" in step
     assert "always()" in step, "a failed CI-alert step must not silence the mirror check"
@@ -384,9 +386,10 @@ def test_red_main_workflow_also_reports_the_liveness_run():
     """Both halves of the wiring: red-main must be TRIGGERED by the detector's
     runs (its `name:` must match the workflow_run list) and must have a step
     that reads them. Either half missing and a stale origin alerts nobody."""
-    wf = ROOT / ".github" / "workflows"
-    name = re.search(r"^name:\s*(\S+)", (wf / "liveness.yml").read_text(), re.M).group(1)
-    text = (wf / "red-main.yml").read_text()
+    # by file, not by folder: the mirror has a .github/workflows of its own (verify.yml)
+    name = re.search(r"^name:\s*(\S+)",
+                     private_file(".github/workflows/liveness.yml").read_text(), re.M).group(1)
+    text = private_file(".github/workflows/red-main.yml").read_text()
     listed = re.search(r"workflow_run:\s*\n\s*workflows: \[([^\]]*)\]", text).group(1)
     assert name in [w.strip() for w in listed.split(",")]
     step = text.split("Report the origin liveness state", 1)[1]
@@ -400,8 +403,8 @@ def test_no_address_or_credential_is_written_into_the_alert_code():
     """scripts/ is published to the public mirror: the operator's address, the
     alert account and its password come from secrets only."""
     for rel in ("scripts/red_main_alert.py", ".github/workflows/red-main.yml"):
-        text = (ROOT / rel).read_text()
+        text = (private_file(rel) if rel.startswith(".github/") else ROOT / rel).read_text()
         assert not re.search(r"[\w.+-]+@[\w-]+\.(com|net|org|io)\b", text), rel
-    wf = (ROOT / ".github" / "workflows" / "red-main.yml").read_text()
+    wf = private_file(".github/workflows/red-main.yml").read_text()
     for name in ("ALERT_SMTP_USER", "ALERT_SMTP_PASSWORD", "ALERT_EMAIL_TO"):
         assert f"{name}: ${{{{ secrets.{name} }}}}" in wf

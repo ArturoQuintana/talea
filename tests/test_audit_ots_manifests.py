@@ -136,6 +136,32 @@ def test_main_reports_gaps_with_their_market_and_returns_one(tmp_path, monkeypat
     assert "Data/es/" not in out
 
 
+def test_an_empty_receipts_file_is_not_a_market_with_receipts(tmp_path, monkeypatch, capsys):
+    """A pass that is refused at the moment of writing has already opened the
+    receipts file; for a market with no receipts yet that leaves an EMPTY file.
+    If its ots/ folder does not exist either (the pass was killed, or raised,
+    before the stamp), the audit took the file's existence for "has receipts"
+    and reported a gap that is not one: there is no receipt to anchor. One
+    receipt and no ots/ is still a gap."""
+    _market(tmp_path, "es", stamped=["2020-01-01.txt"])
+    new = tmp_path / "nz"
+    new.mkdir()
+    (new / "receipts.jsonl").write_text("")                 # opened, nothing written; no ledger, no ots/
+    blank = tmp_path / "zz"
+    blank.mkdir()
+    (blank / "receipts.jsonl").write_text("\n  \n")         # only blank lines
+    gaps, unanchored = audit_ots_manifests.audit_markets(tmp_path, "2026-11-11")
+    assert unanchored == [] and gaps == {"es": []}
+    monkeypatch.setattr(audit_ots_manifests, "DATA_DIR", tmp_path)
+    assert audit_ots_manifests.main() == 0
+    assert "receipts but no ots/" not in capsys.readouterr().out
+
+    (new / "receipts.jsonl").write_text('{"target": "2026-11-12"}\n')   # one receipt, still no ots/
+    assert audit_ots_manifests.audit_markets(tmp_path, "2026-11-11")[1] == ["nz"]
+    assert audit_ots_manifests.main() == 1
+    assert "Data/nz/" in capsys.readouterr().out
+
+
 def test_main_reports_an_unanchored_market_and_returns_one(tmp_path, monkeypatch, capsys):
     _market(tmp_path, "es", stamped=["2020-01-01.txt"])
     _market(tmp_path, "nl", ots=False)

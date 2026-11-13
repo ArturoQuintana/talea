@@ -79,7 +79,7 @@ Per-source redistribution terms (REE public, SMARD CC BY 4.0, Elexon open, ERCOT
 NP4-190 public, JEPX attribution, ENTSO-E **non**-redistributable), attribution,
 deny-by-default publishing, code licensing (MIT), and naming/trademark diligence.
 - Where: `DATA-SOURCES.md`, `Data/<slug>/LICENSE.md`, `LICENSE` (code),
-  `publish_mirror.sh` allowlist.
+  the allowlist in `scripts/mirror_tree.sh` (what `publish_mirror.sh` publishes).
 
 ## 9. AI-agent governance & orchestration
 The audit → resolve cycle (independent read-only auditor + a resolver that fixes

@@ -69,6 +69,11 @@ def find_unstamped(ots_dir: Path, today: str,
     return gaps
 
 
+def has_receipts(path: Path) -> bool:
+    """At least one receipt line: the file exists and is not blank."""
+    return path.exists() and any(line.strip() for line in path.read_text().splitlines())
+
+
 def audit_markets(data_dir: Path, today: str,
                   accepted: dict[str, frozenset[str]] | None = None,
                   ) -> tuple[dict[str, list[str]], list[str]]:
@@ -76,8 +81,11 @@ def audit_markets(data_dir: Path, today: str,
 
     Returns (gaps, unanchored): `gaps` maps each slug that has an ots/
     directory to its unstamped manifest names (empty list = clean);
-    `unanchored` lists slugs that hold receipts.jsonl but have no ots/
-    directory. A directory with neither (Data/calibration) is not a market."""
+    `unanchored` lists slugs that hold at least one receipt but have no ots/
+    directory. A directory with neither (Data/calibration) is not a market,
+    and neither is one whose receipts.jsonl is EMPTY: a pass refused at the
+    moment of writing leaves the file it had opened, with nothing in it, and
+    there is nothing there to anchor."""
     accepted = ACCEPTED_BY_MARKET if accepted is None else accepted
     gaps: dict[str, list[str]] = {}
     unanchored: list[str] = []
@@ -86,7 +94,7 @@ def audit_markets(data_dir: Path, today: str,
         if (market_dir / "ots").is_dir():
             gaps[slug] = find_unstamped(market_dir / "ots", today,
                                         accepted.get(slug, frozenset()))
-        elif (market_dir / "receipts.jsonl").exists():
+        elif has_receipts(market_dir / "receipts.jsonl"):
             unanchored.append(slug)
     return gaps, unanchored
 

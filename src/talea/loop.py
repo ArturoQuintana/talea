@@ -221,14 +221,52 @@ def _repair_torn_tail(path: Path) -> None:
           f"({len(torn)} B -> {path.name}.corrupt); append-only invariant restored")
 
 
-def _append(path: Path, record: dict) -> None:
+def _open_for_append(path: Path) -> int:
+    """Everything an append needs that can take time, done BEFORE the caller
+    decides to write: the folder, the torn-tail repair (which fsyncs), and the
+    open itself. Returns a file descriptor opened for appending; what is left
+    after this returns is one `os.write`."""
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
         _repair_torn_tail(path)
-    with path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(record) + "\n")
-        fh.flush()
-        os.fsync(fh.fileno())             # durable before the tick reports success
+    return os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o666)
+
+
+def _write_whole(fd: int, line: bytes) -> None:
+    """The whole line in one unbuffered write. A record of this size goes in
+    one call; if the operating system takes fewer bytes than it was given, the
+    loop writes the rest, so a short write is completed, not left. Only if such
+    a continuation fails (an error, or the process is stopped between the two
+    calls) is a torn last line left behind, and the next append repairs it."""
+    view = memoryview(line)
+    while view:
+        view = view[os.write(fd, view):]
+
+
+# Where a receipt's stamp goes while the rest of its line is encoded ahead of
+# the clock reading. A value no real field can hold.
+_STAMP_SLOT = "\x00committed_at\x00"
+_STAMP_SLOT_JSON = json.dumps(_STAMP_SLOT)
+
+
+def _encode_around_stamp(record: dict) -> tuple[bytes, bytes]:
+    """`record` as its JSON line, split where its stamp goes: the bytes before
+    the stamp's characters and the bytes after them. Joining them around the
+    stamp gives exactly `json.dumps(record) + "\n"` with the stamp in place."""
+    text = json.dumps(record) + "\n"
+    if text.count(_STAMP_SLOT_JSON) != 1:
+        raise ValueError("a receipt must hold the stamp slot exactly once")
+    head, tail = text.split(_STAMP_SLOT_JSON)
+    return (head + '"').encode("utf-8"), ('"' + tail).encode("utf-8")
+
+
+def _append(path: Path, record: dict) -> None:
+    fd = _open_for_append(path)
+    try:
+        _write_whole(fd, (json.dumps(record) + "\n").encode("utf-8"))
+        os.fsync(fd)                      # durable before the tick reports success
+    finally:
+        os.close(fd)
 
 
 def _load_jsonl(path: Path) -> list[dict]:
@@ -501,16 +539,46 @@ def tick(*, market: Market | None = None, fetch=None, today: date | None = None,
     receipts -> commit tomorrow's receipt (leak guard + clock guard
     permitting). Returns a summary dict. `market` defaults to Spain.
     `fetch`/`today`/`sleep`/`now_fn` injectable for tests; an injected `today`
-    without `now_fn` assumes mid-window (11:00 market-local)."""
+    without `now_fn` assumes mid-window (11:00 market-local).
+
+    THE CLOCK IS READ MORE THAN ONCE. `now`, read here at the start, fixes
+    `today` and the target day. But minutes can pass before a receipt is
+    written: a fetch, and for Spain two retry sleeps of 5 and 15 minutes. So
+    the clock guard is applied again at the moment each receipt is written,
+    to a fresh reading, and that same reading is the receipt's `committed_at`
+    (step 2 below). Until 2026-11-13 the guard judged only the start reading,
+    so a pass that began before the deadline and wrote after it would have
+    produced a receipt (docs/incidents.md; no recorded stamp is past its
+    deadline).
+
+    Every reading is converted to the market's own zone before anything is
+    derived from it, so the deadline is the market's whatever zone the clock
+    answers in; a reading with no zone is refused outright.
+
+    WHAT THIS DOES NOT COVER: it trusts the machine's clock. Within one pass a
+    clock that steps backwards cannot reopen the window (the start check stays,
+    and the first refusal at a write closes the pass). Between two separate
+    passes nothing remembers the earlier one: a clock set back between runs
+    would be believed, as it always was."""
     market = market or _default_market()
     fetch = fetch or market.fetch
     if now_fn is not None:
-        now = now_fn()
+        source = now_fn
     elif today is not None:
-        now = datetime.combine(today, datetime.min.time(),
-                               tzinfo=market.tz).replace(hour=11)
+        fixed = datetime.combine(today, datetime.min.time(),
+                                 tzinfo=market.tz).replace(hour=11)
+        source = lambda: fixed                                     # noqa: E731
     else:
-        now = market_now(market.tz)
+        source = lambda: market_now(market.tz)                     # noqa: E731
+
+    def clock() -> datetime:
+        t = source()
+        if t.tzinfo is None or t.utcoffset() is None:
+            raise ValueError("the tick's clock gave a time with no zone; the "
+                             "deadline cannot be judged from it")
+        return t.astimezone(market.tz)
+
+    now = clock()
     today = today or now.date()
     tomorrow = today + timedelta(days=1)
     summary: dict = {"market": market.slug, "date": today.isoformat(),
@@ -609,23 +677,37 @@ def tick(*, market: Market | None = None, fetch=None, today: date | None = None,
 
     # 2) commit tomorrow's receipts — the leak guard first (per TARGET: once the
     #    day is published, NO strategy may commit), then one receipt per
-    #    pre-registered strategy, each idempotent on (target, strategy).
+    #    pre-registered strategy, each idempotent on (target, strategy, version).
     target = tomorrow
+
+    def past_deadline(t: datetime) -> bool:
+        return t.date() >= tomorrow or (
+            t.date() == today and t.hour >= market.deadline_hour)
+
+    def may_write(t: datetime) -> bool:
+        """At the moment of writing the rule is tighter than at the start: the
+        reading must be on this pass's own day, before the deadline hour. A
+        reading on ANY other day is refused, an earlier one as well: a receipt
+        whose stamp is not on its basis day is not one this pass may write."""
+        return t.date() == today and t.hour < market.deadline_hour
+
     if day_profile(prices, target):
         summary["skipped"].append(f"prices for {target} already published — "
                                   "commit window missed; no receipts (leak guard)")
-    elif now.date() >= tomorrow or (
-            now.date() == today and now.hour >= market.deadline_hour):
+    elif past_deadline(now):
         summary["skipped"].append(
             f"past the {market.deadline_hour}:00 {market.tz.key} commit "
             f"deadline ({now:%H:%M}) — no receipts (clock guard); a missed "
             "day is honest, a post-publication receipt is worthless")
     else:
-        existing = {(r["target"], r["strategy"])
+        # The key receipts, settlement and the invariants all use. A version-1
+        # receipt does not stand in for version 2 of the same name.
+        existing = {(r["target"], r["strategy"], r["strategy_version"])
                     for r in _load_jsonl(market.receipts_path)}
+        crossed_at: datetime | None = None
         for spec in STRATEGIES:
             name = spec["strategy"]
-            if (target.isoformat(), name) in existing:
+            if (target.isoformat(), name, spec["strategy_version"]) in existing:
                 summary["skipped"].append(
                     f"{name}: receipt for {target} already committed (idempotent)")
                 continue
@@ -634,6 +716,26 @@ def tick(*, market: Market | None = None, fetch=None, today: date | None = None,
                 summary["skipped"].append(f"{name}: {why} — cannot commit")
                 continue
             buy, sell = pick_hours(basis)
+            # The clock guard AT THE MOMENT OF WRITING. The start reading passed
+            # (the branch above), but this pass may have spent minutes fetching
+            # and sleeping since. The start check is kept and this one added, so
+            # nothing the old guard refused can pass now.
+            if crossed_at is not None:
+                # One refusal closes the pass: no later strategy is judged on a
+                # new reading, so a clock that steps back cannot let the rest in.
+                summary["skipped"].append(
+                    f"{name}: this pass already crossed the {market.deadline_hour}:00 "
+                    f"{market.tz.key} commit deadline at "
+                    f"{crossed_at:%Y-%m-%d %H:%M:%S} — no receipt (clock guard)")
+                continue
+            # Order matters. Everything that can be done before the clock is read
+            # IS done before it: the receipt is built and its whole line encoded,
+            # with a slot where the stamp goes; the folder is made, a torn tail
+            # repaired, the file opened. THEN the reading. After the reading there
+            # is only: judge it, format it, join three byte strings, and hand the
+            # finished line to the operating system in one unbuffered write. What
+            # the guard judged and what the receipt says cannot differ, and no
+            # work we can move stands between the reading and the write.
             receipt = {
                 "target": target.isoformat(), "basis_day": today.isoformat(),
                 "buy_hours": buy, "sell_hours": sell,
@@ -645,13 +747,32 @@ def tick(*, market: Market | None = None, fetch=None, today: date | None = None,
                 "strategy": name, "strategy_version": spec["strategy_version"],
                 "params": {"power_mw": POWER_MW, "rt_eff": RT_EFF,
                            "fee_eur_mwh": FEE_EUR_MWH, "currency": market.currency},
-                "committed_at": datetime.now(timezone.utc).isoformat(),
+                "committed_at": _STAMP_SLOT,
             }
-            _append(market.receipts_path, receipt)
+            head, tail = _encode_around_stamp(receipt)
+            fd = _open_for_append(market.receipts_path)
+            try:
+                at_write = clock()
+                if not may_write(at_write):
+                    crossed_at = at_write
+                    summary["skipped"].append(
+                        f"{name}: past the {market.deadline_hour}:00 {market.tz.key} "
+                        f"commit deadline at the moment of writing "
+                        f"({at_write:%Y-%m-%d %H:%M:%S}; this pass began at "
+                        f"{now:%H:%M:%S}) — no receipt (clock guard); a missed day "
+                        "is honest, a post-publication receipt is worthless")
+                    continue
+                stamp = at_write.astimezone(timezone.utc).isoformat()
+                _write_whole(fd, head + stamp.encode("ascii") + tail)
+                os.fsync(fd)              # durable before the tick reports success
+            finally:
+                os.close(fd)
+            receipt["committed_at"] = stamp
             summary["committed"].append(receipt)
 
     # The heartbeat's one question: does the PRIMARY receipt for tomorrow stand?
     summary["primary_receipt_stands"] = any(
         r["target"] == target.isoformat() and r["strategy"] == STRATEGY
+        and r["strategy_version"] == STRATEGY_VERSION
         for r in _load_jsonl(market.receipts_path))
     return summary

@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+from conftest import is_private_repo
+
 ROOT = Path(__file__).resolve().parents[1]
 pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
 
@@ -46,11 +48,11 @@ def _commit(repo: Path, msg: str) -> str:
 
 @pytest.fixture
 def repo(tmp_path: Path) -> Path:
-    """`main` holding ES and JP receipts and ledgers; HEAD on a new branch `pr`."""
+    """`main` holding two markets' receipts and ledgers; HEAD on a new branch `pr`."""
     r = tmp_path / "repo"
     subprocess.run(["git", "init", "-q", "-b", "main", str(r)], check=True)
     _git(r, "config", "user.email", "t@t"); _git(r, "config", "user.name", "t")
-    for rel in (RECEIPTS, LEDGER, "Data/jp/receipts.jsonl", "Data/jp/ledger.jsonl"):
+    for rel in (RECEIPTS, LEDGER, "Data/zz/receipts.jsonl", "Data/zz/ledger.jsonl"):
         _write(r, rel, THREE)
     _write(r, "Data/es/prices.json", '{"2026-01-01T00": 1.0}\n')
     _commit(r, "seed")
@@ -200,11 +202,11 @@ def test_bytes_added_to_an_unterminated_last_line_are_refused(tmp_path, capsys):
 
 def test_every_rewritten_file_is_listed_and_no_line_content_is_printed(repo, capsys):
     _write(repo, RECEIPTS, '{"n": 1}\n{"secret": 2}\n{"n": 3}\n')
-    _write(repo, "Data/jp/ledger.jsonl", '{"n": 1}\n')
+    _write(repo, "Data/zz/ledger.jsonl", '{"n": 1}\n')
     _commit(repo, "two rewrites")
     code, out = _check(repo, capsys)
     assert code == 1 and "2 change(s) the audit trail does not allow" in out
-    assert RECEIPTS in out and "Data/jp/ledger.jsonl" in out
+    assert RECEIPTS in out and "Data/zz/ledger.jsonl" in out
     assert "secret" not in out and '"n"' not in out
 
 
@@ -608,10 +610,11 @@ def test_under_github_actions_the_script_refuses_to_start_unless_isolated():
 # quiet edit of ci.yml fail the suite.
 
 CI = ROOT / ".github" / "workflows" / "ci.yml"
+# Skipped only on a public copy. In the private repository a missing ci.yml is a
+# failure: these tests then run and fail on the missing file.
 needs_ci = pytest.mark.skipif(
-    not CI.exists(),
-    reason=".github/workflows/ci.yml is not in this copy (the public mirror carries "
-           "tests/ but not the private repository's workflows)")
+    not CI.exists() and not is_private_repo(),
+    reason="needs .github/workflows/ci.yml, which only the private operations repository has")
 
 HEADER = """name: ci
 on:
@@ -629,6 +632,9 @@ GUARD = [
     "- name: Existing receipt and ledger lines are unchanged (pull requests)",
     "  if: github.event_name == 'pull_request'",
     "  run: |",
+    "    export GIT_NO_REPLACE_OBJECTS=1",
+    '    git rev-parse --verify --quiet "refs/remotes/origin/main^{commit}" >/dev/null || '
+    '{ echo "append-only: CANNOT CHECK -- refs/remotes/origin/main is not in this clone"; exit 2; }',
     '    check="$RUNNER_TEMP/check_append_only.py"',
     '    if git cat-file -e "refs/remotes/origin/main:scripts/check_append_only.py" 2>/dev/null; then',
     '      git show "refs/remotes/origin/main:scripts/check_append_only.py" > "$check"',
@@ -639,6 +645,26 @@ GUARD = [
     '--head "${{ github.event.pull_request.head.sha }}"',
 ]
 SHA_EXPR = "${{ github.event.pull_request.head.sha }}"
+# Everything after the check, pinned too: the whole job is these seven steps.
+REST = [
+    ["- uses: astral-sh/setup-uv@v5"],
+    ["- run: uv sync --locked"],
+    ["- run: uv run pytest -q --cov --cov-report=term-missing --cov-fail-under=98"],
+    ["- name: Re-derive every ledger from raw prices + receipts",
+     "  run: uv run python scripts/verify_ledger.py --all"],
+    ["- name: The public README's command passes in the tree the mirror gets",
+     "  run: |",
+     '    test -f PRIVATE-REPO || { echo "PRIVATE-REPO is missing from this checkout: '
+     'private-only tests would skip instead of fail"; exit 1; }',
+     '    tree="$RUNNER_TEMP/mirror-tree"',
+     '    slugs="$(bash scripts/mirror_tree.sh "$tree")"',
+     '    test -n "$slugs" || { echo "the mirror\'s tree could not be built"; exit 1; }',
+     '    test ! -e "$tree/PRIVATE-REPO" || { echo "PRIVATE-REPO reached the mirror\'s tree"; exit 1; }',
+     '    cd "$tree"',
+     '    git init -q && git add -A && git -c user.name=ci -c user.email=ci@example.test '
+     'commit -qm "the mirror\'s tree"',
+     "    uv sync && uv run pytest"],
+]
 
 
 def _steps(text: str) -> tuple[list[str], list[list[str]]]:
@@ -684,11 +710,15 @@ def _ci_problems(text: str) -> list[str]:
                         "or put another `git` on the PATH)")
     if sum(any("check_append_only" in l for l in s) for s in steps) != 1:
         problems.append("the append-only step is missing or duplicated")
-    if sum(any("uv run pytest" in l for l in s) for s in steps) != 1:
-        problems.append("there must be exactly one suite step")
+    if steps[2:] != REST:
+        problems.append("after the check the job must be exactly: the installer, the locked "
+                        "install, the suite with its coverage gate, the ledger re-derivation, "
+                        "and the public README's command in the mirror's tree; in that order, "
+                        "nothing added, dropped or reworded")
     syncs = [l.strip() for l in lines if "uv sync" in l]
-    if syncs != ["- run: uv sync --locked"]:
-        problems.append(f"the install is {syncs}, not exactly `uv sync --locked`")
+    if syncs != ["- run: uv sync --locked", "uv sync && uv run pytest"]:
+        problems.append(f"the installs are {syncs}: this repository's must be `uv sync --locked`, "
+                        "and the only other is the public README's own command in the mirror's tree")
     for word in ("continue-on-error", "matrix", "strategy", "|| true", "[skip"):
         if word in code:
             problems.append(f"`{word}` appears in ci.yml")
@@ -785,6 +815,25 @@ WEAKENINGS = {
         lambda t: t.replace("fetch-depth: 0", "fetch-depth: 1"),
     "a plain uv sync":
         lambda t: t.replace("uv sync --locked", "uv sync"),
+    "replace refs honoured in the step's own git calls":
+        lambda t: t.replace("          export GIT_NO_REPLACE_OBJECTS=1\n", ""),
+    "no refusal when main is not in the clone":
+        lambda t: "\n".join(l for l in t.splitlines() if "is not in this clone" not in l) + "\n",
+    "the suite's coverage gate lowered":
+        lambda t: t.replace("--cov-fail-under=98", "--cov-fail-under=90"),
+    "the ledger re-derivation dropped":
+        lambda t: "\n".join(l for l in t.splitlines()
+                             if "verify_ledger.py" not in l and "Re-derive every ledger" not in l) + "\n",
+    "the mirror's suite not required to pass":
+        lambda t: t.replace("          uv sync && uv run pytest\n", "          uv sync && uv run pytest || true\n"),
+    "the mirror's suite run on a subset":
+        lambda t: t.replace("          uv sync && uv run pytest\n", "          uv sync && uv run pytest tests/test_loop.py\n"),
+    "the marker no longer required in the checkout":
+        lambda t: "\n".join(l for l in t.splitlines() if "test -f PRIVATE-REPO" not in l) + "\n",
+    "the marker allowed into the mirror's tree":
+        lambda t: "\n".join(l for l in t.splitlines() if 'test ! -e "$tree/PRIVATE-REPO"' not in l) + "\n",
+    "a step added at the end":
+        lambda t: t + "      - run: echo done\n",
 }
 
 
@@ -883,12 +932,37 @@ def test_the_step_is_not_fooled_by_a_tag_named_origin_main(tmp_path):
 
 @needs_ci
 def test_the_step_fails_when_main_cannot_be_found(tmp_path):
-    """No `refs/remotes/origin/main` (a checkout that fetched something else):
-    the step must fail, not fall back to passing."""
+    """No `refs/remotes/origin/main` in the clone (a checkout that fetched
+    something else). Found in review: the lookup of main's copy of the script
+    then failed, the step took that for "main has no script yet" and ran the
+    pull request's own copy. With a copy that exits 0, the step passed. It must
+    refuse before it looks for any script."""
     work = _origin_and_clone(tmp_path, script_on_main=True)
-    head = _git(work, "rev-parse", "HEAD")
+    _write(work, "scripts/check_append_only.py", "import sys\nsys.exit(0)\n")
+    _write(work, LEDGER, '{"n": 1}\n{"n": 22}\n{"n": 3}\n')
+    head = _commit(work, "doctor line 2, and a check that always passes")
     _git(work, "update-ref", "-d", "refs/remotes/origin/main")
-    _write(work, "scripts/check_append_only.py",
-           (ROOT / "scripts" / "check_append_only.py").read_text())
     r = _run_ci_step(work, tmp_path, head)
-    assert r.returncode == 2 and "CANNOT CHECK" in r.stdout
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "CANNOT CHECK -- refs/remotes/origin/main is not in this clone" in r.stdout
+    assert not (tmp_path / "runner-temp" / "check_append_only.py").exists(), \
+        "no copy of the script may even be chosen"
+
+
+@needs_ci
+def test_a_replace_ref_cannot_swap_which_script_the_step_runs(tmp_path):
+    """The script reads git with replace refs switched off. The step's own
+    `git show`, which fetches main's copy of the script, did not: a replace ref
+    for main's commit pointing at the pull request's tip made it fetch the pull
+    request's copy instead."""
+    work = _origin_and_clone(tmp_path, script_on_main=True)
+    main = _git(work, "rev-parse", "refs/remotes/origin/main")
+    _write(work, "scripts/check_append_only.py", "import sys\nsys.exit(0)\n")
+    _write(work, LEDGER, '{"n": 1}\n{"n": 22}\n{"n": 3}\n')
+    head = _commit(work, "doctor line 2, and a check that always passes")
+    _git(work, "replace", main, head)
+    assert "sys.exit(0)" in _git(work, "show", "refs/remotes/origin/main:scripts/check_append_only.py"), \
+        "the trap: git now serves the pull request's copy under main's name"
+    r = _run_ci_step(work, tmp_path, head)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert f"{LEDGER}: line 2 is not the line it was" in r.stdout

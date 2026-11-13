@@ -196,6 +196,32 @@ def test_render_note_footnotes_public_market_with_no_settled_days(tmp_path, monk
     assert "New DA" not in note                      # no table for the young market
 
 
+def test_a_market_with_an_empty_receipts_file_is_not_called_live(tmp_path, monkeypatch):
+    """The note says of such a market "also live, ledgers opened". A receipts
+    file can exist and be EMPTY (a first pass refused at the moment of writing
+    leaves the file it opened), and the note then said a ledger had opened that
+    had not. It takes at least one receipt, or a settlement."""
+    prim_rows = [_row("2026-08-28", PERS, 10.0, oracle=20.0, capture=0.5)]
+    plp = _ledger(tmp_path, prim_rows, "prim.jsonl")
+    prim = SimpleNamespace(slug="es", primary=True, currency="EUR", ledger_path=plp,
+                           receipts_path=plp.with_name("receipts.jsonl"),
+                           presentation=SimpleNamespace(title="Spain DA", tab_name="Spain"))
+    young_lp = tmp_path / "young.jsonl"
+    young_lp.write_text("")
+    receipts = tmp_path / "young_receipts.jsonl"
+    young = SimpleNamespace(slug="new", primary=False, currency="EUR", ledger_path=young_lp,
+                            receipts_path=receipts,
+                            presentation=SimpleNamespace(title="New DA", tab_name="Newland"))
+    monkeypatch.setattr(r, "MARKETS", {"es": prim})
+    for empty in ("", "\n\n", '{"torn": tr'):
+        receipts.write_text(empty)
+        note = r.render_note(date(2026, 8, 28), 7, [prim, young], CAL_ON)
+        assert "Newland" not in note and "ledgers opened" not in note, repr(empty)
+    receipts.write_text('{"target": "2026-08-29", "strategy": "x"}\n')
+    assert "Also live, ledgers opened" in r.render_note(date(2026, 8, 28), 7, [prim, young], CAL_ON)
+    assert r.has_receipts(tmp_path / "no-such-file.jsonl") is False
+
+
 def test_main_writes_out_file(tmp_path, monkeypatch):
     monkeypatch.setattr(r, "render_note", lambda *a, **k: "NOTE-BODY")
     monkeypatch.setattr(r, "public_markets", lambda: [])
