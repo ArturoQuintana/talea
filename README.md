@@ -64,5 +64,6 @@ for the measured effect. Prices come from each market's public source
 above; Spain is cross-checked weekly against the independent token-based ESIOS
 route.
 
-Reproduce everything: `uv sync && uv run pytest` (the settlement math is pure
-functions), then follow [VERIFY.md](VERIFY.md).
+Run the tests: `uv sync && uv run pytest`. Tests that need files kept in the
+private repository skip and name the file. The ledger itself re-derives with
+`python scripts/verify_ledger.py --all`. Then follow [VERIFY.md](VERIFY.md).

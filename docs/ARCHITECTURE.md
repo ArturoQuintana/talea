@@ -33,7 +33,7 @@ GB note (audit finding 2026-09-07): GB's feed is the Elexon BMRS Market Index
 (APXMIDP leg) — a traded within-day reference index that populates
 progressively through the delivery day, NOT the GB day-ahead auction clearing
 price. Receipts are still leak-guarded (no price for the target day exists at
-the 09:00 UTC tick), but yesterday's profile is never complete at that tick, so
+the 11:00 Madrid tick, 10:00 UTC in winter and 09:00 UTC in summer), but yesterday's profile is never complete at that tick, so
 the persistence primary (and rank-blend, which needs it) structurally never
 commit in GB; only climatology and weekly do. Disclosed on gb.html
 (`presentation.note`) and in VERIFY.md; whether to move GB to a genuine
@@ -96,7 +96,7 @@ library. See docs/market-plugin-refactor-plan.md.
                    ▲                                              │
                    │ analysis clone, sessions                     ▼ raw reads (no auth)
               Mac (cockpit)                          Cloud routines (claude.ai):
-                                                      - daily digest 16:35 UTC
+                                                      - auditors, resolvers, month-end
                                                       - Monday independent auditor
 
     External: apidatos.ree.es (price route A) · api.esios.ree.es (route B,
@@ -189,12 +189,16 @@ library. See docs/market-plugin-refactor-plan.md.
 
 ## Automation & verification (updated 2026-08-27)
 
-    Cloud routines (claude.ai, Gmail/push-notified):
-      daily digest        ~16:35 UTC — ledger email
-      Monday auditor      07:00 UTC  — fresh-context, READ-ONLY (never writes)
-      Monday resolver     09:00 UTC  — fixes audit findings, auto-merges GREEN
-                                       PRs (CI-gated), escalates gated items
-      month-end review    1st 08:00 UTC
+    Daily digest: the server tick's own email (scripts: email_digest in
+    src/talea/__main__.py), sent after a tick that settles, or on trouble;
+    it replaced the cloud digest routine, which is disabled.
+    Cloud routines (claude.ai, email through the Gmail connector):
+      Monday auditor      03:00 New York — fresh-context, READ-ONLY (never writes)
+      Monday resolver     05:00 New York — fixes audit findings on PRs it never
+                                       merges itself, escalates gated items
+      month-end review    1st 04:00 New York
+      (03:00/05:00/04:00 New York = 08:00/10:00/09:00 UTC on US winter
+      time, an hour earlier in UTC on summer time)
       gate reminder       one-time 2026-09-04 — GBM v2 override window closes
     CI (GitHub Actions, on push/PR):
       pytest under a COVERAGE GATE  +  verify_ledger.py --all (re-derives EVERY

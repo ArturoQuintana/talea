@@ -9,9 +9,13 @@ checked here — those belong in the ledger/status/dashboard, never frozen in a
 doc."""
 import functools
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
-from conftest import private_file, published_file
+import pytest
+
+from conftest import is_private_repo, private_file, published_file
 from talea.loop import STRATEGIES
 from talea.markets import MARKETS
 
@@ -445,6 +449,362 @@ def test_public_docs_disclose_that_pnl_does_not_enforce_dispatch_order():
             assert bad not in text, f"{name} again claims relative metrics are robust, unqualified"
     assert "scripts/feasibility_report.py" in verify and "NOT robust" in verify
     assert (ROOT / "scripts" / "feasibility_report.py").exists()
+
+
+README_TEST_COMMAND = "uv sync && uv run pytest"
+
+
+def test_public_readme_says_what_its_test_command_shows():
+    """Incident 2026-11-13: the public README said "Reproduce everything:
+    `uv sync && uv run pytest`", and on the mirror that command stopped at
+    collection, because nothing ran it there. The README must say that tests
+    needing private files skip and name the file, and point at the ledger's own
+    re-derivation, not promise that the tests reproduce everything."""
+    readme = " ".join(published_file("README-public.md", "README.md").read_text().split())
+    assert "Reproduce everything" not in readme
+    assert f"Run the tests: `{README_TEST_COMMAND}`." in readme
+    assert "Tests that need files kept in the private repository skip and name the file." in readme
+    assert "`python scripts/verify_ledger.py --all`" in readme
+
+
+def test_ci_runs_the_public_readmes_command_in_the_mirrors_tree():
+    """The same incident: the README and CI name the same command. This checks
+    only that the last line of ci.yml's mirror step is the README's command, so
+    that changing one without the other fails here. That the step runs at all,
+    and runs that line in the mirror's tree (no `if:`, no `continue-on-error`,
+    no dropped `cd`, nothing added), is test_check_append_only.py's: it pins the
+    whole step, line by line."""
+    ci = _private_text(".github/workflows/ci.yml")
+    step = ci.split("- name: The public README's command passes in the tree the mirror gets", 1)
+    assert len(step) == 2, "ci.yml lost the step that runs the README's command in the mirror's tree"
+    body = step[1].split("\n      - ", 1)[0]
+    last = [l.strip() for l in body.splitlines() if l.strip()][-1]
+    assert last == README_TEST_COMMAND, \
+        f"ci.yml's mirror step runs {last!r}, not the README's command"
+
+
+# How a mirrored file can name a pull request of the private repository:
+# "#<n>", "PR <n>", "PR#<n>", "PRs #<n>", "pull/<n>", "pull request <n>". Any case.
+# (This file is mirrored too and is read by the same check, so no real number is
+# written in it: the cases below put theirs in at run time.)
+PR_NUMBER = re.compile(r"#\d+|\bPRs?\s*#?\d+|\bpull/\d+|\bpull\s+requests?\s*#?\d+", re.I)
+# The numbers in mirrored files that are not PRs: (file, the words before the
+# "#", the number). Exact file, exact words, exact number.
+NOT_A_PR = {
+    ("docs/ARCHITECTURE.md", "defect ", 3),
+    ("src/talea/markets/_entsoe.py", "defect ", 3),
+    ("src/talea/markets/fr/__init__.py", "defect ", 3),
+    ("src/talea/markets/__init__.py", "shortlist's ", 1),
+    ("src/talea/markets/gb/__init__.py", "shortlist's ", 1),
+    ("tests/test_workflow_schedules.py", "finding ", 2),
+}
+# The one file that writes HTML by hand. In it, two things are not PRs:
+# - a CSS colour it uses today that starts with a digit, listed here exactly
+#   (without its "#", so that this file names none), and only inside one of
+#   the two whole CSS tokens the file writes colours in: a custom property
+#   "--name:<colour>;" or a fallback "var(--name,<colour>)". A new colour fails
+#   the check until it is added; a "#" and digits anywhere else is not a colour,
+#   listed or not ("PR:", "see:", "x," or "margin:" before it are caught).
+# - a numeric character reference ("&#" digits ";").
+HTML_WRITERS = {"scripts/render_dashboard.py"}
+HTML_COLOURS = frozenset({"006300", "0b0b0b", "0ca30c", "0d0d0d", "111", "1a1a19", "2a78d6",
+                          "2c2c2a", "383835", "3987e5", "52514e", "666", "898781"})
+HEX_RUN = re.compile(r"#([0-9a-fA-F]+)(?![0-9A-Za-z_])")
+# A limit, stated: a whole token is exempt wherever it stands, even in a comment
+# or prose; only its shape is checked, not that it is CSS.
+CSS_BEFORE = {";": re.compile(r"(?<![\w-])--[a-z0-9-]+:\Z"),
+              ")": re.compile(r"(?<![\w-])var\(--[a-z0-9-]+,\Z")}
+ENTITY = re.compile(r"#\d+;")
+# Not read: the pages scripts/render_dashboard.py generates at the mirror's
+# root (their CSS colours look like "#<digits>"; the script that writes them is
+# read), named exactly, and files that are not UTF-8 text. Every other .html is
+# read: a recorded upstream page kept as a test fixture is copied verbatim.
+
+
+def _generated_pages() -> set[str]:
+    """index.html for the primary market, <slug>.html for each other public one
+    (render_dashboard.py's _href), at the root only. An assumption, by name: a
+    file at one of those paths is taken to be the renderer's page. Nothing here
+    checks that its content came from the renderer."""
+    from talea.markets import public_markets
+    return {"index.html"} | {f"{m.slug}.html" for m in public_markets() if not m.primary}
+
+
+def _pr_numbers(rel: str, text: str) -> list[str]:
+    """Each PR reference in `text`, as "<rel>:<line>: <match>"."""
+    found = []
+    for m in PR_NUMBER.finditer(text):
+        if any(rel == f and m.group() == f"#{n}" and text.endswith(words, 0, m.start())
+               for f, words, n in NOT_A_PR):
+            continue
+        if rel in HTML_WRITERS:
+            hex_run = HEX_RUN.match(text, m.start())
+            if hex_run and hex_run.group(1).lower() in HTML_COLOURS:
+                before = CSS_BEFORE.get(text[hex_run.end():hex_run.end() + 1])
+                if before and before.search(text, 0, m.start()):
+                    continue
+            if text[m.start() - 1:m.start()] == "&" and ENTITY.match(text, m.start()):
+                continue
+        found.append(f"{rel}:{text.count(chr(10), 0, m.start()) + 1}: {m.group()}")
+    return found
+
+
+def _text(path: Path) -> str | None:
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+# The lines of scripts/mirror_tree.sh that copy a NAMED .md file to the mirror.
+_TOP = re.compile(r'^cp (VERIFY\.md [^\n]*) "\$MIRROR/"$', re.M)
+_LOOP = re.compile(r"^for d in ([^;]*); do$", re.M)
+_README = re.compile(r'^cp README-public\.md "\$MIRROR/README\.md"$', re.M)
+_MOVED = re.compile(r"^  --include='/README-MOVED\.md' \\$", re.M)
+
+
+def _named_documents(tree: str) -> list[str]:
+    """The .md files `tree` (the text of scripts/mirror_tree.sh) copies by name,
+    as paths in this repository. Every line of code in it that names a .md file
+    must be one of the four forms read here, so a document copied some new way
+    fails this test instead of going unchecked."""
+    top, loop, readme, moved = (r.search(tree) for r in (_TOP, _LOOP, _README, _MOVED))
+    assert top and loop and readme and moved, \
+        "scripts/mirror_tree.sh no longer copies documents the way this test reads"
+    read = set()
+    for m in (top, loop, readme, moved):
+        first = tree.count("\n", 0, m.start())
+        read.update(range(first, first + m.group().count("\n") + 1))
+    unread = [l for i, l in enumerate(tree.splitlines())
+              if i not in read and not l.lstrip().startswith("#") and re.search(r"\.md\b", l)]
+    assert not unread, f"scripts/mirror_tree.sh names .md files in lines this test does not read: {unread}"
+    names = top.group(1).split()
+    names += ["docs/" + n for n in loop.group(1).replace("\\", " ").split()]
+    return ["README-public.md", "Data/README-MOVED.md", "Data/esios_prices.json"] + names
+
+
+def _mirrored_documents() -> list[tuple[str, Path]]:
+    """The files the mirror gets, as far as this repository can tell without
+    building it: the ones scripts/mirror_tree.sh names, and every file inside
+    the trees it copies whole (src/, scripts/, tests/, Data/calibration/ and each
+    public market's Data/<slug>/), plus Data/esios_prices.json. The guard above
+    covers named .md files only; CI's scan of the built tree is the guarantee."""
+    from talea.markets import public_markets
+    names = _named_documents((ROOT / "scripts" / "mirror_tree.sh").read_text())
+    assert "docs/incidents.md" in names and "VERIFY.md" in names
+    docs = [(n, published_file(n, "README.md") if n == "README-public.md" else ROOT / n) for n in names]
+    trees = ["src", "scripts", "tests", "Data/calibration"] + [f"Data/{m.slug}" for m in public_markets()]
+    for d in trees:
+        docs += [(p.relative_to(ROOT).as_posix(), p) for p in sorted((ROOT / d).rglob("*"))
+                 if p.is_file() and "__pycache__" not in p.parts]
+    # Copied by name without ".md": the licence (if present) and the mirror's workflow.
+    docs += [(n, ROOT / n) for n in ("LICENSE",) if (ROOT / n).exists()]
+    docs += [("mirror/verify.yml", ROOT / "mirror" / "verify.yml")]
+    return docs
+
+
+def test_mirrored_documents_name_no_private_pr_number():
+    """Review finding 2026-11-14 (Codex): docs/incidents.md is copied verbatim to
+    the public mirror and four of its rows held eleven references, by number, to
+    pull requests of the private repository. A private PR number means nothing to a public
+    reader and points into a repository they cannot open. Each mirrored file
+    must describe the change in words instead. Round 2 of the same review found
+    this test file itself, mirrored with tests/, quoting the very numbers.
+
+    Every UTF-8 text file is read, not only documents, except the pages the
+    renderer generates (_generated_pages). Two places, two lists. On a public copy (no
+    PRIVATE-REPO) the checkout IS the published tree, so every file in it is
+    read, however it got there: CI runs this in the tree scripts/mirror_tree.sh
+    builds, on every push. Here, in the private repository, the list is what
+    mirror_tree.sh names plus the trees it copies whole: a faster check before
+    CI, not the guarantee."""
+    files = _mirrored_documents() if is_private_repo() else _published_files(ROOT)
+    rels = {rel for rel, _ in files}
+    assert {"docs/incidents.md", "tests/test_docs_in_sync.py"} <= rels, \
+        "the list of mirrored files is missing docs/incidents.md or this test file: it was not read"
+    found = _scan(files)
+    assert not found, f"mirrored files name a PR number: {found}"
+
+
+def _scan(files: list[tuple[str, Path]]) -> list[str]:
+    generated = _generated_pages()
+    return [hit for rel, path in files
+            if rel not in generated and (text := _text(path)) is not None
+            for hit in _pr_numbers(rel, text)]
+
+
+def test_only_the_generated_pages_go_unread(tmp_path):
+    """Review finding 2026-11-14 (Codex): skipping every .html also skipped
+    tests/fixtures/ercot_listing_12331.html, an upstream page recorded verbatim
+    and published with tests/. Only the renderer's own pages are skipped."""
+    from talea.markets import public_markets
+    others = [m.slug for m in public_markets() if not m.primary]
+    primary = [m.slug for m in public_markets() if m.primary]
+    assert others and primary
+    unread = ["index.html"] + [f"{s}.html" for s in others]
+    read = (["tests/fixtures/ercot_listing_12331.html", "tests/fixtures/new.html",
+             "docs/index.html", f"docs/{others[0]}.html"] + [f"{s}.html" for s in primary])
+    files = []
+    for rel in unread + read:
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text("<!-- landed in PR #{a} -->\n".format(**NUM))
+        files.append((rel, tmp_path / rel))
+    assert sorted(h.split(":", 1)[0] for h in _scan(files)) == sorted(read)
+
+
+# Folders a reader's own tools create in a copy: never published.
+NOT_PUBLISHED = {".git", ".venv", ".pytest_cache", "__pycache__"}
+
+
+def _published_files(root: Path) -> list[tuple[str, Path]]:
+    """Every file of a public copy at `root`. The mirror is published as a git
+    commit and a reader's copy is a clone of it, so: what git tracks there.
+    Without git (a downloaded archive), every file under `root` outside the
+    folders a reader's own tools create."""
+    try:
+        out = subprocess.run(["git", "-C", str(root), "ls-files", "-z"],
+                             capture_output=True, check=True).stdout.decode()
+        rels = [r for r in out.split("\0") if r]
+    except (OSError, subprocess.CalledProcessError):
+        rels = [p.relative_to(root).as_posix() for p in root.rglob("*")
+                if p.is_file() and not NOT_PUBLISHED & set(p.relative_to(root).parts)]
+    return [(r, root / r) for r in sorted(rels)]
+
+
+def _tree(root: Path) -> None:
+    for rel in ("docs/incidents.md", "tools/new/notes.py", ".venv/lib/x.md", "a.txt"):
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text("text\n")
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
+def test_published_files_are_what_git_tracks(tmp_path):
+    _tree(tmp_path)
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "add", "docs", "tools", "a.txt"], check=True)
+    assert [r for r, _ in _published_files(tmp_path)] == ["a.txt", "docs/incidents.md", "tools/new/notes.py"]
+
+
+def test_published_files_without_git_skip_only_tool_folders(tmp_path):
+    _tree(tmp_path)
+    (tmp_path / "__pycache__").mkdir()
+    (tmp_path / "__pycache__" / "y.md").write_text("text\n")
+    (tmp_path / ".github").mkdir()
+    (tmp_path / ".github" / "z.yml").write_text("text\n")
+    rels = [r for r, _ in _published_files(tmp_path)]
+    # tmp_path is not inside a git repository, so git fails and the walk is used
+    assert rels == [".github/z.yml", "a.txt", "docs/incidents.md", "tools/new/notes.py"]
+
+
+def test_text_skips_binary_files_only(tmp_path):
+    (tmp_path / "p.html").write_text("text")
+    (tmp_path / "b.ots").write_bytes(b"\x00\xff\xfe")
+    (tmp_path / "s.py").write_text("text")
+    assert [_text(tmp_path / n) for n in ("p.html", "b.ots", "s.py")] == ["text", None, "text"]
+
+
+# Numbers put into the cases at run time, so that this file names none.
+NUM = {"a": 123, "b": 45, "c": 6, "d": 7, "e": 89, "three": 3, "four": 4, "thirty_one": 31,
+       "one": 1, "two": 2, "entity": 8209}
+
+
+@pytest.mark.parametrize("rel, text, caught", [
+    ("docs/incidents.md", "landed (PR #{a})", ["PR #{a}"]),
+    ("docs/incidents.md", "see PR {a}", ["PR {a}"]),
+    ("docs/incidents.md", "see pr{a}", ["pr{a}"]),
+    ("docs/incidents.md", "see PR#{a}", ["PR#{a}"]),
+    ("docs/incidents.md", "PRs #{b} and #{c}", ["PRs #{b}", "#{c}"]),
+    ("docs/incidents.md", "PRs {b} and {c}", ["PRs {b}"]),
+    ("docs/incidents.md", "since #{c}; #{d}-#{e} sat open", ["#{c}", "#{d}", "#{e}"]),
+    ("docs/incidents.md", "#{d}\u2013#{e}", ["#{d}", "#{e}"]),
+    ("docs/incidents.md", "draft PRs (#{b}, #{c})", ["#{b}", "#{c}"]),
+    ("docs/incidents.md", "a code span `#{a}`", ["#{a}"]),
+    ("docs/incidents.md", "issue#{c}", ["#{c}"]),
+    ("docs/incidents.md", "&#{a};", ["#{a}"]),
+    ("docs/incidents.md", "github.com/o/r/pull/{a}", ["pull/{a}"]),
+    ("docs/incidents.md", "Pull/{a}", ["Pull/{a}"]),
+    ("docs/incidents.md", "pull request {a}", ["pull request {a}"]),
+    ("docs/incidents.md", "Pull Requests #{a}", ["Pull Requests #{a}"]),
+    ("tests/test_x.py", "# landed in PR #{a}", ["PR #{a}"]),
+    ("docs/ARCHITECTURE.md", "defect #{three}, is fixed", []),
+    ("docs/ARCHITECTURE.md", "defect #{three} and #{four}", ["#{four}"]),
+    ("docs/ARCHITECTURE.md", "defect #{four}", ["#{four}"]),
+    ("docs/ARCHITECTURE.md", "Defect #{three}", ["#{three}"]),
+    ("docs/ARCHITECTURE.md", "defect #{thirty_one}", ["#{thirty_one}"]),
+    ("VERIFY.md", "defect #{three}", ["#{three}"]),
+    ("src/talea/markets/__init__.py", "The shortlist's #{one};", []),
+    ("src/talea/markets/__init__.py", "The shortlist's #{two};", ["#{two}"]),
+    ("tests/test_workflow_schedules.py", "audit finding #{two}):", []),
+    ("tests/test_workflow_schedules.py", "audit finding #{one}):", ["#{one}"]),
+    ("scripts/render_dashboard.py", "Bitcoin&#{entity};confirmed", []),
+    ("scripts/render_dashboard.py", "see #{a}", ["#{a}"]),
+    ("scripts/render_dashboard.py", "(#{a})", ["#{a}"]),
+    ("scripts/render_dashboard.py", "see PR #{a}", ["PR #{a}"]),
+    ("scripts/render_dashboard.py", "--ink:#{a}; --g:#{b}{a}e;", ["#{a}", "#{b}{a}"]),
+    ("scripts/render_dashboard.py", "see #{b}, #{e}{a}{a}, #{a}a, #{entity};", ["#{b}", "#{e}{a}{a}", "#{a}", "#{entity}"]),
+    ("scripts/other.py", "Bitcoin&#{entity};", ["#{entity}"]),
+    ("docs/incidents.md", "a resolver PR, then a pull request", []),
+    ("docs/incidents.md", "APR {a}, sprint {c}, PR-free", []),
+    ("docs/incidents.md", "the pull/ folder, # heading, {a}-{b}", []),
+])
+def test_pr_number_detector(rel, text, caught):
+    assert [h.split(": ", 1)[1] for h in _pr_numbers(rel, text.format(**NUM))] == \
+        [c.format(**NUM) for c in caught]
+
+
+@pytest.mark.parametrize("colour", sorted(HTML_COLOURS))
+def test_each_listed_colour_is_not_a_pr_in_the_html_writer_only(colour):
+    text = f"--ink:#{colour}; a{{color:var(--x,#{colour.upper()})}}"
+    assert _pr_numbers("scripts/render_dashboard.py", text) == []
+    for long_name in ("--" + "a" * 200 + f":#{colour};", " --" + "a" * 200 + f":#{colour};",
+                      "var(--" + "a" * 200 + f",#{colour})", "(var(--" + "a" * 200 + f",#{colour})"):
+        assert _pr_numbers("scripts/render_dashboard.py", long_name) == [], long_name[:12]
+    assert _pr_numbers("scripts/other.py", text) != []
+    assert _pr_numbers("scripts/render_dashboard.py", f"--ink:#{colour}0;") != []
+    for outside in (f"see #{colour}", f"(#{colour})", f"--ink: #{colour};", f"x=#{colour}",
+                    f"# see PR:#{colour}", f"see:#{colour}", f"x,#{colour}", f"margin:#{colour};",
+                    f"color:#{colour};", f"--ink:#{colour}", f"--ink:#{colour} ;", f"var(--x,#{colour}",
+                    f"var(--x, #{colour})", f"x--ink:#{colour};", f"ivar(--x,#{colour})",
+                    "x--" + "a" * 57 + f":#{colour};", "x--" + "a" * 200 + f":#{colour};",
+                    "ivar(--" + "a" * 200 + f",#{colour})"):
+        assert _pr_numbers("scripts/render_dashboard.py", outside) != [], outside
+
+
+def test_listed_colours_are_all_still_used():
+    """A colour no longer in the page code is taken off the list, so the
+    exception never grows wider than what the file writes."""
+    text = (ROOT / "scripts" / "render_dashboard.py").read_text().lower()
+    unused = [c for c in sorted(HTML_COLOURS) if not re.search(rf"#{c}(?![0-9a-z_])", text)]
+    assert not unused, f"HTML_COLOURS lists colours render_dashboard.py no longer uses: {unused}"
+
+
+_TREE_OK = """# comment naming CLAUDE.md
+  --include='/README-MOVED.md' \\
+cp VERIFY.md GOVERNANCE.md pyproject.toml "$MIRROR/"
+for d in a.md \\
+         b.md; do
+  cp "docs/$d" "$MIRROR/docs/"
+done
+cp README-public.md "$MIRROR/README.md"
+"""
+
+
+def test_named_documents_are_read_from_the_copy_commands():
+    assert _named_documents(_TREE_OK) == ["README-public.md", "Data/README-MOVED.md",
+                                          "Data/esios_prices.json", "VERIFY.md",
+                                          "GOVERNANCE.md", "pyproject.toml", "docs/a.md", "docs/b.md"]
+
+
+@pytest.mark.parametrize("change", [
+    lambda t: t + 'cp NEW.md "$MIRROR/"\n',
+    lambda t: t + 'cp "$x" "$MIRROR/docs/" # NEW.md\n',
+    lambda t: t.replace("cp README-public.md", "cp  README-public.md"),
+    lambda t: t.replace("for d in", "for doc in"),
+    lambda t: t.replace("  --include='/README-MOVED.md'", "  --include='/README-NEW.md'"),
+])
+def test_a_document_copied_another_way_fails(change):
+    with pytest.raises(AssertionError):
+        _named_documents(change(_TREE_OK))
 
 
 def test_open_decisions_register_is_well_formed():

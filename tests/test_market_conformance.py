@@ -155,7 +155,8 @@ def test_every_receipt_in_the_record_was_committed_before_its_deadline(market):
     to be disclosed, never edited away (the files are append-only)."""
     path = DATA / market.slug / "receipts.jsonl"
     if not path.exists():
-        pytest.skip(f"no receipts file for {market.slug} in this checkout")
+        pytest.skip(f"needs Data/{market.slug}/receipts.jsonl, which this checkout does not have "
+                    "(the public mirror carries only the public markets' data)")
     late, other_day, unreadable, wrong_basis = _receipts_past_deadline(path, market)
     where = f"Data/{market.slug}/receipts.jsonl"
     assert not unreadable, (f"{where}: line(s) {unreadable} have no readable target, basis_day "
