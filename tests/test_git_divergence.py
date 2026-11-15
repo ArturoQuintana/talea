@@ -369,11 +369,11 @@ WORKFLOWS = ROOT / ".github" / "workflows"
 # between them.)
 PINNED = {
     # the one job `test`: the append-only check, the suite, the ledger re-derivation
-    "ci.yml": {"sha256": "2750fdd1928adfc82bbe1de672148b7a52035787da6a17b7a9599d8ede02ff1d", "writes": None},
+    "ci.yml": {"sha256": "2aa2319d9de6f8bd6fe2a2d95f84d1a15f8aeb6f991dd1d91d23df983369b665", "writes": None},
     # WRITER: ERCOT's ladder; commits and pushes Data/ercot
-    "ercot.yml": {"sha256": "206109fc44cb5115cceb79f5ce9024aaf3871c67d855444ccdc315bc36066ac5", "writes": "ercot"},
+    "ercot.yml": {"sha256": "7afa79f68ab0214600b3df7f755623dfc1ab8513d2c9e5c3f7de605d889b14a0", "writes": "ercot"},
     # WRITER: JP's ladder; commits and pushes Data/jp
-    "jp.yml": {"sha256": "e57fa21cde53fcb2c7e50317ebe7a47dc409e2fba38553ad83b3203cfe30bb7f", "writes": "jp"},
+    "jp.yml": {"sha256": "150178f7fa4b5c27aedb0216f8e22fb90e7a5601bcd6f9d03e5a2d57f2508c94", "writes": "jp"},
     # read-only: every registered market still reaches origin
     "liveness.yml": {"sha256": "a479901cc898052651cc5ff522a9fcb8c16bdd464cd131fdf05da7cf5cc109af", "writes": None},
     # read-only on the repository: the red-main alert (issues and email)

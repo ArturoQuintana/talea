@@ -36,7 +36,8 @@ DOCS = {"backtest-baselines-2015-2026.md", "backtest-markets-2026-08.md", "ARCHI
         "research-track-records-2026-08.md", "knowledge-map.md"}
 RENAMED = {"README-public.md": "README.md", "mirror/verify.yml": ".github/workflows/verify.yml"}
 NEVER = ("PRIVATE-REPO", "CLAUDE.md", "INFRA.md", "SECRETS.md", "open-decisions.md",
-         "multiple-comparisons-policy.md", "BACKLOG.md", ".env")
+         "multiple-comparisons-policy.md", "BACKLOG.md", ".env",
+         "team")    # the gate's code and the private-content check: never published
 
 
 def _need(*programs: str) -> None:

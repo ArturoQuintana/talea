@@ -648,6 +648,11 @@ SHA_EXPR = "${{ github.event.pull_request.head.sha }}"
 # Everything after the check, pinned too: the whole job is these seven steps.
 REST = [
     ["- uses: astral-sh/setup-uv@v5"],
+    ["- name: No private content in the tree the mirror gets",
+     "  env:",
+     '    UV_LOCKED: "1"',
+     "  run: |",
+     "    python3 -I -S team/private_content_check.py --repo . --canary"],
     ["- run: uv sync --locked"],
     ["- run: uv run pytest -q --cov --cov-report=term-missing --cov-fail-under=98"],
     ["- name: Re-derive every ledger from raw prices + receipts",
@@ -711,9 +716,10 @@ def _ci_problems(text: str) -> list[str]:
     if sum(any("check_append_only" in l for l in s) for s in steps) != 1:
         problems.append("the append-only step is missing or duplicated")
     if steps[2:] != REST:
-        problems.append("after the check the job must be exactly: the installer, the locked "
-                        "install, the suite with its coverage gate, the ledger re-derivation, "
-                        "and the public README's command in the mirror's tree; in that order, "
+        problems.append("after the check the job must be exactly: the installer, the "
+                        "private-content check, the locked install, the suite with its coverage "
+                        "gate, the ledger re-derivation, and the public README's command in the "
+                        "mirror's tree; in that order, "
                         "nothing added, dropped or reworded")
     syncs = [l.strip() for l in lines if "uv sync" in l]
     if syncs != ["- run: uv sync --locked", "uv sync && uv run pytest"]:

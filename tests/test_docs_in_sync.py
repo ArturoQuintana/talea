@@ -758,7 +758,8 @@ def test_each_listed_colour_is_not_a_pr_in_the_html_writer_only(colour):
     assert _pr_numbers("scripts/render_dashboard.py", text) == []
     for long_name in ("--" + "a" * 200 + f":#{colour};", " --" + "a" * 200 + f":#{colour};",
                       "var(--" + "a" * 200 + f",#{colour})", "(var(--" + "a" * 200 + f",#{colour})"):
-        assert _pr_numbers("scripts/render_dashboard.py", long_name) == [], long_name[:12]
+        assert _pr_numbers("scripts/render_dashboard.py", long_name) == [], \
+            f"{long_name[:8]}...({len(long_name)} characters)...{long_name[-12:]}"
     assert _pr_numbers("scripts/other.py", text) != []
     assert _pr_numbers("scripts/render_dashboard.py", f"--ink:#{colour}0;") != []
     for outside in (f"see #{colour}", f"(#{colour})", f"--ink: #{colour};", f"x=#{colour}",
