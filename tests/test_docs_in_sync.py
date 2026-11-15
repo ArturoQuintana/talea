@@ -313,6 +313,36 @@ def test_every_alert_channel_states_whether_the_operator_confirmed_it():
                                        {"ntfy": False})     # honest "unknown" passes
 
 
+def _routine_rows_claiming_a_push(schedule: str) -> list[str]:
+    """Rows of docs/schedule.md that name a cloud routine (`trig_...`) and say it
+    pushes, without saying the push is retired or unverified."""
+    return [line[:90] for line in schedule.splitlines()
+            if line.startswith("|") and "trig_" in line
+            and re.search(r"\bpush(es)?\b", line, re.IGNORECASE)
+            and not re.search(r"retired|unverified", line, re.IGNORECASE)]
+
+
+def test_schedule_does_not_say_a_routine_pushes():
+    """Constitutional audit 2026-11-15 (D-1): the phone push was retired
+    2026-11-11 (D-17), yet docs/schedule.md still said the month-end review
+    "emails + pushes only on a trigger" and the winter v2 gate "pushes only on
+    BUILD-CANDIDATE". The routine mirrors were corrected (T-08); the schedule,
+    which describes them, was not. A routine row may name the push only to say
+    it is retired, or that a prompt is unverified."""
+    schedule = _private_text("docs/schedule.md")
+    assert "trig_" in schedule, "no routine rows found — has docs/schedule.md moved?"
+    assert not _routine_rows_claiming_a_push(schedule), _routine_rows_claiming_a_push(schedule)
+
+    # the guard must be able to fail the way the real drift did
+    assert _routine_rows_claiming_a_push(
+        "| 1st | Month-end review; emails + pushes only on a trigger | routine `trig_x` | a |")
+    assert _routine_rows_claiming_a_push(
+        "| 2027 | Winter gate, emails verdict, pushes only on BUILD-CANDIDATE | `trig_y` | a |")
+    # a git push by the tick is not a routine row and passes
+    assert not _routine_rows_claiming_a_push(
+        "| 11:00 | Daily tick: fetch → settle → commit → push | server timer | auto |")
+
+
 def test_mirror_is_deny_by_default_allowlist():
     """Incident 2026-08-28: FR (private, derived-only) leaked to the PUBLIC mirror
     through a DENY-LIST gap — fr/ was never added to the excludes. The Talea mirror
