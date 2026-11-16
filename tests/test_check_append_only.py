@@ -654,7 +654,9 @@ REST = [
      "  run: |",
      "    python3 -I -S team/private_content_check.py --repo . --canary"],
     ["- run: uv sync --locked"],
-    ["- run: uv run pytest -q --cov --cov-report=term-missing --cov-fail-under=98"],
+    ["- run: uv run pytest -q --cov --cov-report=term-missing --cov-fail-under=98 -m \"not heavy\""],
+    ["- name: The slow tests, without coverage",
+     "  run: uv run pytest -q -m heavy"],
     ["- name: Re-derive every ledger from raw prices + receipts",
      "  run: uv run python scripts/verify_ledger.py --all"],
     ["- name: The public README's command passes in the tree the mirror gets",
@@ -718,7 +720,7 @@ def _ci_problems(text: str) -> list[str]:
     if steps[2:] != REST:
         problems.append("after the check the job must be exactly: the installer, the "
                         "private-content check, the locked install, the suite with its coverage "
-                        "gate, the ledger re-derivation, and the public README's command in the "
+                        "gate, the slow tests, the ledger re-derivation, and the public README's command in the "
                         "mirror's tree; in that order, "
                         "nothing added, dropped or reworded")
     syncs = [l.strip() for l in lines if "uv sync" in l]

@@ -329,8 +329,8 @@ def test_mirror_runs_are_read_without_the_token_when_github_refuses_it():
 
 def test_red_main_workflow_is_wired_and_read_only():
     text = private_file(".github/workflows/red-main.yml").read_text()
-    assert re.search(r"workflow_run:\s*\n\s*workflows: \[ci, origin-liveness\]", text), \
-        "must run after every CI run and every origin-liveness run"
+    assert re.search(r"workflow_run:\s*\n\s*workflows: \[ci, origin-liveness, mirror-freshness\]", text), \
+        "must run after every CI run, every origin-liveness run and every mirror-freshness run"
     assert "branches: [main]" in text
     assert re.search(r'- cron:\s*"\d+ \d+ \* \* \*"', text), "must repeat daily while red"
     assert "workflow_dispatch" in text and "--drill" in text, "must be drillable on demand"
@@ -408,3 +408,100 @@ def test_no_address_or_credential_is_written_into_the_alert_code():
     wf = private_file(".github/workflows/red-main.yml").read_text()
     for name in ("ALERT_SMTP_USER", "ALERT_SMTP_PASSWORD", "ALERT_EMAIL_TO"):
         assert f"{name}: ${{{{ secrets.{name} }}}}" in wf
+
+
+# --- the fourth target: the public mirror's freshness (register T-28) ---
+
+def test_a_red_freshness_run_opens_its_own_issue_and_says_what_red_means():
+    gh = FakeGitHub([_run("failure", "2026-11-16T12:45:00Z")])
+    assert _go(gh, "workflow_run", target=rma.FRESHNESS) == 0
+    assert gh.log == [("create", rma.FRESHNESS.title, "owner")]
+    assert gh.read == ("mirror-freshness.yml", None)
+    assert len({t.title for t in rma.TARGETS.values()}) == len(rma.TARGETS) == 4
+    assert "mirror freshness RED on the mirror" in FakeSMTP.sent[-1]["Subject"]
+    still = rma.build_email("email_still_red", {"days": 1, "failed_runs": 3},
+                            sender="a@example.test", to="b@example.test", target=rma.FRESHNESS)
+    body = still.get_content()
+    # red means one of four things; the title asserts none of them, the reminder names
+    # each, and says where to tell them apart
+    assert rma.FRESHNESS.title == "The public mirror's freshness check is red"
+    assert "Red can mean any of these; the run log is the authority on which." in body
+    assert "STALE: the public mirror has missed two publish windows in a row" in body
+    assert "server's journal" in body
+    assert "CANNOT JUDGE: the check could not determine freshness" in body
+    assert "the time-zone data was missing" in body
+    assert "A failed step before the check" in body and "the check did not run" in body
+    assert "The next successful run of the check closes this issue." in body
+
+
+def _freshness_reminder() -> str:
+    return rma.build_email("email_still_red", {"days": 1, "failed_runs": 2}, sender="a@example.test",
+                           to="b@example.test", target=rma.FRESHNESS).get_content()
+
+
+def test_a_freshness_drill_is_not_reported_as_a_stale_mirror():
+    """mirror-freshness.yml's own drill fails on purpose, and red-main cannot see
+    that input (its `!inputs.drill` guard is its own). So nothing red-main sends
+    may say the mirror is stale; and since a drill can run while the mirror IS
+    stale, the DRILL sentence may not say the mirror is fine either."""
+    gh = FakeGitHub([_run("failure", "2026-11-16T12:50:00Z")])
+    assert _go(gh, "workflow_run", target=rma.FRESHNESS) == 0
+    first = FakeSMTP.sent[-1]
+    assert "stale" not in first["Subject"].lower() and "stale" not in rma.FRESHNESS.title.lower()
+    assert "is failing" in first.get_content() and "stale" not in first.get_content().lower()
+    body = _freshness_reminder()
+    assert "DRILL: a run started with drill=true fails on purpose; it says nothing about the mirror." in body
+    assert "nothing is wrong" not in body.lower()
+
+
+def test_a_stale_run_after_a_drill_keeps_the_issue_open():
+    """Only a successful run closes the issue: a drill followed by a real
+    failure (and a drill run while the mirror is stale) leaves it open and
+    reminds, as the reminder's last sentence promises."""
+    issue = {"number": 7, "title": rma.FRESHNESS.title, "html_url": "https://example.test/issues/7"}
+    for runs in ([_run("failure", "2026-11-16T13:15:00Z"), _run("failure", "2026-11-16T12:50:00Z")],
+                 [_run("failure", "2026-11-16T12:50:00Z"), _run("failure", "2026-11-16T12:45:00Z")]):
+        gh = FakeGitHub(runs, dict(issue))
+        assert _go(gh, "schedule", target=rma.FRESHNESS) == 0
+        assert [e[0] for e in gh.log] == ["comment"]
+    assert "The next successful run of the check closes this issue." in _freshness_reminder()
+
+
+def test_a_green_freshness_run_after_a_drill_closes_the_issue():
+    """A drill run fails on purpose; the next successful run closes the issue,
+    with its email."""
+    issue = {"number": 7, "title": rma.FRESHNESS.title, "html_url": "https://example.test/issues/7"}
+    gh = FakeGitHub([_run("success", "2026-11-16T13:15:00Z"), _run("failure", "2026-11-16T12:50:00Z")],
+                    issue)
+    assert _go(gh, "workflow_run", target=rma.FRESHNESS) == 0
+    assert [e[0] for e in gh.log] == ["comment", "close"]
+    assert FakeSMTP.sent[-1]["Subject"].startswith("talea mirror freshness green again on the mirror")
+
+
+def test_freshness_target_is_selectable_and_reads_this_repo(monkeypatch):
+    seen = {}
+
+    def fake_run(gh, env, *, event, drill=False, target=None, watch_repo=None):
+        seen.update(target=target, watch_repo=watch_repo)
+        return 0
+    monkeypatch.setattr(rma, "run", fake_run)
+    monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
+    monkeypatch.setenv("GITHUB_TOKEN", "tok")
+    assert rma.main(["--target", "freshness"]) == 0
+    assert seen == {"target": rma.FRESHNESS, "watch_repo": None}
+
+
+def test_red_main_workflow_also_reports_the_freshness_run():
+    """Both halves of the wiring, as for liveness: triggered by the detector's
+    runs (by its `name:`), and a step that reads them."""
+    name = re.search(r"^name:\s*(\S+)",
+                     private_file(".github/workflows/mirror-freshness.yml").read_text(), re.M).group(1)
+    text = private_file(".github/workflows/red-main.yml").read_text()
+    listed = re.search(r"workflow_run:\s*\n\s*workflows: \[([^\]]*)\]", text).group(1)
+    assert name in [w.strip() for w in listed.split(",")]
+    step = text.split("Report the public mirror's freshness", 1)[1]
+    assert "--target freshness" in step
+    assert "always()" in step and "!inputs.drill" in step
+    for name in ("ALERT_SMTP_USER", "ALERT_SMTP_PASSWORD", "ALERT_EMAIL_TO"):
+        assert f"{name}: ${{{{ secrets.{name} }}}}" in step
+

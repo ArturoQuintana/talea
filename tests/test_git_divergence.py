@@ -369,15 +369,17 @@ WORKFLOWS = ROOT / ".github" / "workflows"
 # between them.)
 PINNED = {
     # the one job `test`: the append-only check, the suite, the ledger re-derivation
-    "ci.yml": {"sha256": "2aa2319d9de6f8bd6fe2a2d95f84d1a15f8aeb6f991dd1d91d23df983369b665", "writes": None},
+    "ci.yml": {"sha256": "9449318641307293190d42b614fd413bd8c0b8d9b5b0c6f72991e25099b370b5", "writes": None},
     # WRITER: ERCOT's ladder; commits and pushes Data/ercot
     "ercot.yml": {"sha256": "7afa79f68ab0214600b3df7f755623dfc1ab8513d2c9e5c3f7de605d889b14a0", "writes": "ercot"},
     # WRITER: JP's ladder; commits and pushes Data/jp
     "jp.yml": {"sha256": "150178f7fa4b5c27aedb0216f8e22fb90e7a5601bcd6f9d03e5a2d57f2508c94", "writes": "jp"},
     # read-only: every registered market still reaches origin
     "liveness.yml": {"sha256": "a479901cc898052651cc5ff522a9fcb8c16bdd464cd131fdf05da7cf5cc109af", "writes": None},
+    # read-only: the public mirror is still being published after the server's windows
+    "mirror-freshness.yml": {"sha256": "c0498891fd7852ea403627594f6c0b435243bc5eeae66025588e33ed3d118a24", "writes": None},
     # read-only on the repository: the red-main alert (issues and email)
-    "red-main.yml": {"sha256": "ffcd095bc2e7fca537478fdbf0b54c56459d12696bec8fbe81bf0978ed6a81c9", "writes": None},
+    "red-main.yml": {"sha256": "3e60269ee9db09c90b55254dcbb0b584686c4f06cd523086c70defb52bc7eea8", "writes": None},
 }
 # workflow file -> the market it writes. The behaviour tests below run for
 # exactly these; that a file is a writer is a fact written in the table by a

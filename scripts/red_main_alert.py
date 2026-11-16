@@ -76,7 +76,18 @@ LIVENESS = Target(
     "origin for two days or its newest stored price is more than two days old; "
     "the run log names it. If the server's own digest shows that market as "
     "fresh, the server's clone has diverged from origin (INFRA.md runbook).")
-TARGETS = {"ci": CI, "mirror-verify": MIRROR_VERIFY, "liveness": LIVENESS}
+FRESHNESS = Target(
+    "mirror-freshness.yml", "The public mirror's freshness check is red",
+    "mirror freshness", "on the mirror", "The mirror-freshness check", "mirror freshness",
+    "Red can mean any of these; the run log is the authority on which. STALE: the "
+    "public mirror has missed two publish windows in a row, so what readers see is "
+    "behind the ledger (the publisher's reason, if it refused or its push failed, is "
+    "in the server's journal). CANNOT JUDGE: the check could not determine freshness "
+    "(for example, GitHub's push history was unreadable or could not be shown complete, "
+    "or the time-zone data was missing). A failed step before the check (checkout, uv): "
+    "the check did not run. DRILL: a run started with drill=true fails on purpose; it "
+    "says nothing about the mirror. The next successful run of the check closes this issue.")
+TARGETS = {"ci": CI, "mirror-verify": MIRROR_VERIFY, "liveness": LIVENESS, "freshness": FRESHNESS}
 
 TITLE = CI.title
 DRILL_TITLE = "[DRILL] CI is red on main — delivery test"
