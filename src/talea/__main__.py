@@ -334,6 +334,68 @@ def ots_stamp(label: str, *, ots_dir: Path | None = None,
         print(f"[esios-paper] ots: STAMP-FAILED {exc}")
 
 
+# THE READ-TO-WRITE GAP (register T-35, D-36), observe-only. A receipt's stamp
+# is a clock reading taken just before its line is written (loop.py); the time
+# from that reading to the write is the residual D-36 chose to observe instead
+# of a margin. It is read here, outside loop.py, from the file itself: the
+# operating system sets the receipts file's modification time when it writes,
+# so file time minus the LAST receipt's stamp is that receipt's gap. Only the
+# last receipt per file is measured (a pass appends several; the file keeps the
+# time of the last write). Integer nanoseconds throughout, never floats.
+# File times can lag the clock by the kernel's coarse tick, so the reading
+# itself is a lower bound; WRITE_GAP_RESOLUTION_NS is added and the result
+# rounded UP to whole milliseconds. That is an upper bound only UNDER TWO
+# ASSUMPTIONS, which are printed with every number: the file clock lags by at
+# most 10 ms, and the clock did not step between the reading and the write.
+# It is never a negative number. It never decides anything, and it never
+# stops a tick or a backup: any failure to observe prints "not measured".
+WRITE_GAP_RESOLUTION_NS = 10_000_000
+WRITE_GAP_ASSUMES = "assumes the file clock lags ≤10 ms and the clock did not step"
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def _ns(t: datetime) -> int:
+    """`t` as integer nanoseconds since the epoch, exactly (no float)."""
+    d = t - _EPOCH
+    return (d.days * 86_400 + d.seconds) * 1_000_000_000 + d.microseconds * 1_000
+
+
+def last_write_gap(receipts: Path) -> int | None:
+    """File time minus the last receipt's stamp, in nanoseconds; None when
+    there is no receipt to measure or the file cannot be read."""
+    try:
+        lines = receipts.read_bytes().splitlines()
+        stamp = datetime.fromisoformat(json.loads(lines[-1])["committed_at"])
+        return receipts.stat().st_mtime_ns - _ns(stamp)
+    except (OSError, IndexError, KeyError, TypeError, ValueError):   # TypeError: a stamp without a zone
+        return None
+
+
+def describe_write_gap(gap_ns: int | None) -> str:
+    """The gap plus the resolution, rounded up to whole milliseconds: "≤N ms".
+    Never a negative number; a file time more than the resolution BEFORE the
+    stamp is said as such."""
+    if gap_ns is None:
+        return "not measured"
+    if gap_ns <= -WRITE_GAP_RESOLUTION_NS:
+        return "not measured: the file's time is before the stamp (the clock stepped?)"
+    # Deliberately loose for a file time 0-10 ms BEFORE the stamp: the lag is
+    # taken as the whole resolution, so it reads "≤10 ms", never less.
+    bound = max(gap_ns, 0) + WRITE_GAP_RESOLUTION_NS
+    return f"≤{-(-bound // 1_000_000)} ms"
+
+
+def _gap_line(market_slug: str, receipts: Path, summary: dict) -> None:
+    """Print the pass's gap; an observation that fails says so and never
+    stops the tick."""
+    try:
+        if summary.get("committed"):
+            print(f"[esios-paper:{market_slug}] write gap, last receipt: "
+                  f"{describe_write_gap(last_write_gap(receipts))} ({WRITE_GAP_ASSUMES})")
+    except Exception as exc:  # noqa: BLE001 — observe-only: never in the tick's way
+        print(f"[esios-paper:{market_slug}] write gap: not measured ({type(exc).__name__})")
+
+
 def git_backup(label: str) -> None:
     """Commit + push Data/ (prices, receipts, ledger — the audit trail). Best
     effort by design: a failed commit/push must never fail the tick (the next
@@ -345,7 +407,29 @@ def git_backup(label: str) -> None:
     if run("diff", "--cached", "--quiet").returncode == 0:
         print("[esios-paper] backup: up to date")
         return
-    c = run("commit", "-m", f"data: tick {label}")
+    # The write gaps of the receipts files this commit carries, in the BODY
+    # (the subject stays "data: tick <date>", which docs/calendar.md greps):
+    # the channel by which server state reaches the team (D-29, D-30). The
+    # whole observation is optional: any failure in it (finding the staged
+    # files, a bounded git call, reading, formatting) prints "not measured"
+    # and the commit and push go on exactly as without it.
+    body: list[str] = []
+    try:
+        staged = subprocess.run(["git", "-C", str(REPO), "diff", "--cached", "--name-only",
+                                 "--", "Data/*/receipts.jsonl"],
+                                capture_output=True, text=True, timeout=30)
+        if staged.returncode != 0:
+            print(f"[esios-paper] write gap: not measured (git exit {staged.returncode})")
+        else:
+            gaps = [f"{Path(name).parent.name} {describe_write_gap(last_write_gap(REPO / name))}"
+                    for name in staged.stdout.split()
+                    if name.startswith("Data/") and name.endswith("/receipts.jsonl")]
+            if gaps:
+                body = ["-m", f"Write gap, last receipt per file ({WRITE_GAP_ASSUMES}; "
+                              "register T-35): " + ", ".join(gaps)]
+    except Exception as exc:  # noqa: BLE001 — observe-only: never in the backup's way
+        print(f"[esios-paper] write gap: not measured ({type(exc).__name__})")
+    c = run("commit", "-m", f"data: tick {label}", *body)
     if c.returncode != 0:
         print(f"[esios-paper] backup: COMMIT-FAILED {c.stderr.strip()[:200]}")
         return
@@ -406,6 +490,7 @@ def cmd_tick(market_slug: str | None = None) -> int:
             with writer_lock(m.ledger_path.parent / ".tick.lock"):
                 s = tick(market=m)
                 _print_summary(s, f"esios-paper:{market_slug}")
+                _gap_line(market_slug, m.receipts_path, s)
                 # OTS-anchor this market's audit trail into its own Data/<slug>/
                 # ots (rides the ES tick's git_backup). No heartbeat/email/push.
                 ots_stamp(s["date"], ots_dir=m.ledger_path.parent / "ots",
@@ -421,6 +506,7 @@ def cmd_tick(market_slug: str | None = None) -> int:
         with writer_lock(DATA_DIR / "es" / ".tick.lock"):
             s = tick()
             _print_summary(s, "esios-paper")
+            _gap_line("es", RECEIPTS, s)
             ots_stamp(s["date"])
             git_backup(s["date"])
             heartbeat(s["primary_receipt_stands"])
