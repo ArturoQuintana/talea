@@ -378,8 +378,10 @@ PINNED = {
     "liveness.yml": {"sha256": "a479901cc898052651cc5ff522a9fcb8c16bdd464cd131fdf05da7cf5cc109af", "writes": None},
     # read-only: the public mirror is still being published after the server's windows
     "mirror-freshness.yml": {"sha256": "c0498891fd7852ea403627594f6c0b435243bc5eeae66025588e33ed3d118a24", "writes": None},
+    # read-only: when each receipt reached GitHub, against its deadline (register T-35)
+    "receipt-push-times.yml": {"sha256": "01e4f4b8038d329f3b2228159bbfa8d2df4155febda3f0842a86b719c6985f9d", "writes": None},
     # read-only on the repository: the red-main alert (issues and email)
-    "red-main.yml": {"sha256": "3e60269ee9db09c90b55254dcbb0b584686c4f06cd523086c70defb52bc7eea8", "writes": None},
+    "red-main.yml": {"sha256": "a34363158715a6cfe65c3691703615b9631b52008a56fc1560bb9afb49e507a8", "writes": None},
 }
 # workflow file -> the market it writes. The behaviour tests below run for
 # exactly these; that a file is a writer is a fact written in the table by a

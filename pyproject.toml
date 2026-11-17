@@ -7,6 +7,14 @@ dependencies = []
 [dependency-groups]
 dev = ["pytest>=8", "pytest-cov>=5", "hypothesis>=6"]
 
+[tool.pytest.ini_options]
+# A marker that is not registered below fails the run, so a typo can never
+# move a test silently out of (or into) the "not heavy" selection.
+addopts = ["--strict-markers"]
+markers = [
+    "heavy: slow tests (the private-content check's grids and its real-tree run); CI runs them in their own step, without coverage",
+]
+
 # Coverage gate lives in CI (see .github/workflows/ci.yml). The floor is a
 # RATCHET: raised as surfaces gain tests, never lowered. It covers the core
 # package AND the production-critical scripts (the dashboard the public reads,
@@ -14,11 +22,6 @@ dev = ["pytest>=8", "pytest-cov>=5", "hypothesis>=6"]
 # two-route corruption guard, the OTS immutability auditor). Only the
 # analysis-only scripts (backtests, the founding-probe reproduction) are
 # human-run and omitted from the gate.
-[tool.pytest.ini_options]
-markers = [
-    "heavy: slow tests (the private-content check's grids and its real-tree run); CI runs them in their own step, without coverage",
-]
-
 [tool.coverage.run]
 source = ["src/talea", "scripts", "team"]
 omit = [
