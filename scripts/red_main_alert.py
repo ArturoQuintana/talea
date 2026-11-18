@@ -95,6 +95,44 @@ email); if GitHub also refuses the close, or returns an issue without a number,
 the unlabelled fault issue may stay open, one per run while the cut lasts; nothing
 is emailed; each run fails, so the red run is the signal.
 
+A SCHEDULED WORKFLOW THAT STOPS RUNNING (`--target schedules`, 2026-11-17):
+every target above judges runs that exist, so a schedule GitHub disabled,
+dropped or never registered turns nothing red. This target reads every
+workflow on the checked-out main that has a `schedule:` block, plus the public
+mirror's verify run (its source is mirror/verify.yml; `--repo` names the
+mirror). Its schedule must be a `schedule:` block whose every line is
+`- cron: "M H * * *"` (or a comment); anything else makes it unreadable (the
+fault path), never a guess. A workflow is STOPPED
+when GitHub shows it in any state but `active`, has no workflow for its file,
+or when its newest scheduled run (by created_at, in any status: a queued run
+means the schedule fired) is older than its THRESHOLD: the longest interval
+between its cron slots plus SCHEDULE_SLACK (16 h; GitHub starts our scheduled
+runs 4 to 10 hours late). The clock starts no earlier than the time GitHub
+registered the workflow, so a new one is not judged before its first window.
+One issue, "A scheduled workflow has stopped running", lists every stopped
+workflow; its body ends with the line "Stopped: <names>", the set last told.
+First stop: open and email. While it lasts: the daily schedule comments and
+reminds. The SET changes while the issue is open (another one stops, or one
+runs again while others are still stopped): first a comment ending with the
+new "Stopped:" line (the record), then an email, then the body. The four
+emails of this target's own alert (opening, reminder, change, all running
+again) must go: missing email settings count as a failure (exit 1); the fault
+path's emails follow that path's own rule, as for every target. The set last told is the newest
+such comment's, else the body's, so one change is emailed once even if the
+body never updates; a failed comment sends no email. All running again: close
+and email. A schedule, state, run list, issue or comment list that cannot be
+read is a fault (the `red-main-fault` issue above), and nothing else is judged
+in that run: a partial read is never taken as all running. STATED LIMITS: a
+lost email (any of those four) is not retried, no pending state is kept;
+the run fails, so red-main's heartbeat posts /fail, which is the backup
+channel. Only red-main's own unedited comments are records: a person's
+look-alike comment, or an edited record, is ignored. The discovery reads the
+workflow source as written: a schedule deliberately disguised (escaped keys
+and the like) is not detected; accidental shapes are what it guards against.
+A cron edited on an existing workflow does not restart the clock; the
+first gap under the new schedule may be up to a day longer than the threshold
+allows, and the false alarm closes itself at the next scheduled run.
+
 Stdlib-only, like verify_ledger.py. No address or credential lives in this file:
 ALERT_SMTP_USER / ALERT_SMTP_PASSWORD / ALERT_EMAIL_TO come from the workflow's
 secrets. Without them the email is skipped (and said so) — the issue still files.
@@ -111,6 +149,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
+from pathlib import Path
 from typing import NamedTuple
 
 
@@ -162,8 +201,14 @@ PUSH_TIMES = Target(
     "with no push in the record, a push history unreadable or not reaching back, a partial or "
     "shallow clone, or a reset main. A failed step before the check: the check did not run. "
     "The next successful run closes this issue.")
+SCHEDULES = Target(
+    "(every scheduled workflow)", "A scheduled workflow has stopped running",
+    "scheduled workflows", "", "A scheduled workflow", "schedules",
+    "While it lasts, what that workflow watches or writes is not being done on "
+    "schedule; a writer's market misses its receipts, a detector's class goes "
+    "unwatched. The issue lists each stopped workflow and why.")
 TARGETS = {"ci": CI, "mirror-verify": MIRROR_VERIFY, "liveness": LIVENESS, "freshness": FRESHNESS,
-           "push-times": PUSH_TIMES}
+           "push-times": PUSH_TIMES, "schedules": SCHEDULES}
 
 TITLE = CI.title
 DRILL_TITLE = "[DRILL] CI is red on main — delivery test"
@@ -174,6 +219,7 @@ MAX_LATE = 3                       # streaks reported late one by one per run; t
 MAX_PAGES = 10                     # pages of 100 runs read at most per target
 PER_PAGE = 100
 FAULT_LABEL = "red-main-fault"     # labels the "could not read enough history" issues
+SCHEDULE_SLACK = timedelta(hours=16)   # above GitHub's observed lateness swing (up to ~10 h)
 
 
 # --- pure decisions ---------------------------------------------------------
@@ -298,6 +344,12 @@ def build_email(kind: str, facts: dict, *, sender: str, to: str,
         "email_history_cut": f"talea red-main could not read enough history for {t.name}",
         "email_history_still": f"talea red-main still cannot read enough history for {t.name}",
         "email_history_ok": f"talea red-main reads enough history again for {t.name}",
+        "email_stopped": f"talea scheduled workflow STOPPED: {facts.get('names', '')}",
+        "email_still_stopped": f"talea scheduled workflow still STOPPED — day {facts.get('days', 0)}: "
+                               f"{facts.get('names', '')}",
+        "email_stopped_changed": f"talea scheduled workflows: the stopped set changed — now: "
+                                 f"{facts.get('names', '')}",
+        "email_running_again": "talea scheduled workflows: all running again",
     }
     bodies = {
         "email_red": (
@@ -343,6 +395,22 @@ def build_email(kind: str, facts: dict, *, sender: str, to: str,
         "email_history_ok": (
             f"red-main reads enough history again for {t.name}: history readable again.\n"
             f"  {facts.get('run_url', '')}\n\nClosed: {facts.get('issue_url', '')}"),
+        "email_stopped": (
+            "A scheduled workflow has stopped running on schedule. Check its state in "
+            "GitHub's Actions tab (re-enable it if disabled) and its newest run:\n"
+            f"{facts.get('listing', '')}\n\nTracked in: {facts.get('issue_url', '')}\n"
+            f"Run: {facts.get('run_url', '')}\n{t.why}\n"
+            "A reminder follows once a day while it lasts."),
+        "email_still_stopped": (
+            f"Still stopped — day {facts.get('days', 0)}:\n{facts.get('listing', '')}\n\n"
+            f"Tracked in: {facts.get('issue_url', '')}\n{t.why}"),
+        "email_stopped_changed": (
+            "The set of stopped scheduled workflows changed. Stopped now:\n"
+            f"{facts.get('listing', '')}\n\nBefore: {facts.get('before', '')}\n"
+            f"Tracked in: {facts.get('issue_url', '')}"),
+        "email_running_again": (
+            "Every scheduled workflow runs on schedule again. Nothing to do.\n"
+            f"  {facts.get('run_url', '')}\n\nClosed: {facts.get('issue_url', '')}"),
         "drill": (
             "This is a DRILL. Nothing is wrong and there is nothing to do.\n\n"
             "It proves that a red-main alert reaches both mailboxes and that the\n"
@@ -355,6 +423,165 @@ def build_email(kind: str, facts: dict, *, sender: str, to: str,
     msg["Cc"] = sender
     msg.set_content(bodies[kind])
     return msg
+
+
+# --- scheduled workflows: pure parts ----------------------------------------
+
+CRON_LINE = re.compile(r"""^\s*- cron: (["'])(.*?)\1\s*(#.*)?$""")
+SCHEDULE_KEY = re.compile(r"^(\s*)schedule:(.*)$")
+SCHEDULE_ANY = re.compile(r"""\bschedule["']?\s*:""")
+CRON_KEY = re.compile(r"\bcron\s*:")
+DAILY_CRON = re.compile(r"^([0-9]|[1-5][0-9]) ([0-9]|1[0-9]|2[0-3]) \* \* \*$")
+STOPPED_LINE = re.compile(r"^Stopped: (.*)$", re.M)
+
+
+class Watched(NamedTuple):
+    """One scheduled workflow. `repo` None = this repository. `slots` are the
+    cron times as minutes after midnight UTC, sorted; `error` says why the
+    schedule could not be read (then `slots` is empty and it is not judged)."""
+    key: str
+    file: str
+    repo: str | None
+    slots: tuple[int, ...]
+    error: str | None
+
+
+def read_schedule(text: str) -> tuple[bool, tuple[int, ...], str | None]:
+    """(has a schedule, its slots, why it cannot be read). ONE layout is
+    understood: a `schedule:` key alone on its line, then a block in which
+    every line that is not blank and not a comment reads `- cron: "M H * * *"`
+    (quoted). Anything else in the block (a flow-style entry, another key,
+    another cron shape), a `schedule:` with something after it, a schedule
+    key anywhere else on a line (flow style: `on: {schedule: [...]}`), or a
+    `cron:` outside such a block makes the schedule unreadable: never a guess.
+    A workflow input literally named `schedule` is read as unreadable too: a
+    loud false alarm, never a silent miss."""
+    lines = text.splitlines()
+    code = [(i, l) for i, l in enumerate(lines) if l.strip() and not l.lstrip().startswith("#")]
+    keys = [(i, m) for i, l in code if (m := SCHEDULE_KEY.match(l))]
+    loose = [i for i, l in code if SCHEDULE_ANY.search(l) and not SCHEDULE_KEY.match(l)]
+    if loose:            # `on: {schedule: [...]}` and the like: scheduled, but not read
+        return True, (), f"line {loose[0] + 1} has a schedule key that is not a block (flow style)"
+    if not keys:
+        if any(CRON_KEY.search(l) for _, l in code):
+            return True, (), "a cron: line outside a schedule: block"
+        return False, (), None
+    slots, inside = [], set()
+    for i, m in keys:
+        if m.group(2).split("#", 1)[0].strip():
+            return True, (), f"schedule: line {i + 1} is not a block (flow style)"
+        indent = len(m.group(1))
+        for j, l in code:
+            if j <= i:
+                continue
+            if len(l) - len(l.lstrip()) <= indent:
+                break
+            inside.add(j)
+            c = CRON_LINE.match(l)
+            cron = DAILY_CRON.match(c.group(2)) if c else None
+            if not cron:
+                return True, (), f'line {j + 1} is not - cron: "M H * * *"'
+            slots.append(int(cron.group(2)) * 60 + int(cron.group(1)))
+    if any(CRON_KEY.search(l) for j, l in code if j not in inside):
+        return True, (), "a cron: line outside a schedule: block"
+    if not slots:
+        return True, (), "a schedule: block with no cron line"
+    return True, tuple(sorted(set(slots))), None
+
+
+def scheduled_workflows(root: Path, mirror_repo: str | None) -> list[Watched]:
+    """Every workflow file under root/.github/workflows with a schedule, then
+    the public mirror's verify run (source: root/mirror/verify.yml), read on
+    `mirror_repo`. A missing mirror source is reported, not skipped."""
+    out = []
+    wf = root / ".github" / "workflows"
+    for path in sorted(list(wf.glob("*.yml")) + list(wf.glob("*.yaml"))):
+        scheduled, slots, error = read_schedule(path.read_text(encoding="utf-8"))
+        if scheduled:
+            out.append(Watched(path.name, path.name, None, slots, error))
+    if mirror_repo:
+        src = root / "mirror" / "verify.yml"
+        key = f"verify.yml (on {mirror_repo})"
+        if src.is_file():
+            scheduled, slots, error = read_schedule(src.read_text(encoding="utf-8"))
+            out.append(Watched(key, "verify.yml", mirror_repo, slots,
+                               error or (None if scheduled else "mirror/verify.yml has no schedule")))
+        else:
+            out.append(Watched(key, "verify.yml", mirror_repo, (), "its source mirror/verify.yml is missing"))
+    return out
+
+
+def threshold(slots: tuple[int, ...]) -> timedelta:
+    """The longest interval between consecutive cron slots (around midnight
+    too; one slot a day = 24 h), plus SCHEDULE_SLACK."""
+    gaps = [(b - a) for a, b in zip(slots, slots[1:])] + [slots[0] + 1440 - slots[-1]]
+    return timedelta(minutes=max(gaps)) + SCHEDULE_SLACK
+
+
+def _hours(d: timedelta) -> str:
+    return f"{d.total_seconds() / 3600:.1f} h"
+
+
+def judge(w: Watched, info: dict | None, newest: dict | None, now: datetime) -> str | None:
+    """Why `w` is STOPPED, or None while it runs. `info` is GitHub's workflow
+    (None: GitHub has none for this file); `newest` its newest scheduled run."""
+    if info is None:
+        return "GitHub has no workflow for this file"
+    if info.get("state") != "active":
+        return f"GitHub shows it as {info.get('state')}"
+    limit = threshold(w.slots)
+    registered = _at(info["created_at"])
+    if newest is None:
+        if now - registered > limit:
+            return (f"no scheduled run since GitHub registered it at {info['created_at']} "
+                    f"({_hours(now - registered)}; threshold {_hours(limit)})")
+        return None
+    start = max(_at(newest["created_at"]), registered)
+    if now - start > limit:
+        return (f"no scheduled run for {_hours(now - start)} (threshold {_hours(limit)}); "
+                f"newest: {newest['created_at']}")
+    return None
+
+
+CHANGE_HEAD = "The set of stopped workflows changed."
+RED_MAIN_LOGIN = "github-actions[bot]"     # the identity red-main's GITHUB_TOKEN posts as
+
+
+def _record(comment: dict) -> bool:
+    """A change record: posted by red-main's own token identity, never edited,
+    and starting with the change heading. A person's look-alike comment, or an
+    edited record, is not one."""
+    return ((comment.get("user") or {}).get("login") == RED_MAIN_LOGIN
+            and comment.get("created_at") is not None
+            and comment.get("updated_at") == comment.get("created_at")
+            and (comment.get("body") or "").startswith(CHANGE_HEAD))
+
+
+def _stopped(text: str) -> set[str] | None:
+    m = STOPPED_LINE.search(text or "")
+    return None if m is None else {k.strip() for k in m.group(1).split(";") if k.strip()}
+
+
+def told_set(issue: dict, comments: list[dict]) -> set[str] | None:
+    """The set of stopped workflows last told: the newest change RECORD's
+    "Stopped:" line if there is one (a change is told by its comment first;
+    see _record), else the body's; None if neither has the line."""
+    for c in reversed(comments):                      # oldest first, as GitHub lists them
+        if _record(c) and (told := _stopped(c["body"])) is not None:
+            return told
+    return _stopped(issue.get("body") or "")
+
+
+def schedules_body(problems: dict[str, str]) -> str:
+    return (f"{SCHEDULES.subject} has stopped running on schedule.\n\n" + _listing(problems)
+            + "\n\nThis issue is commented once a day while it lasts, and when the set of "
+            "stopped workflows changes; it closes itself when every scheduled workflow runs "
+            "again (`scripts/red_main_alert.py --target schedules`).\n\n"
+            + f"Stopped: {'; '.join(sorted(problems))}")
+
+
+def _listing(problems: dict[str, str]) -> str:
+    return "\n".join(f"- `{k}`: {problems[k]}" for k in sorted(problems))
 
 
 # --- effects ----------------------------------------------------------------
@@ -418,6 +645,49 @@ class GitHub:
             if len(batch) < PER_PAGE:
                 return out
         raise HistoryCut("the issues")
+
+    def _read(self, path: str, repo: str | None) -> dict | None:
+        """GET `path`; None on 404. For ANOTHER repository (the public mirror)
+        a refusal of this workflow's token is retried without one."""
+        try:
+            return self.call("GET", path, repo=repo)
+        except urllib.error.HTTPError as exc:
+            if repo is not None and exc.code in (401, 403, 404):
+                try:
+                    return self.call("GET", path, repo=repo, auth=False)
+                except urllib.error.HTTPError as again:
+                    if again.code == 404:
+                        return None
+                    raise
+            if exc.code == 404:
+                return None
+            raise
+
+    def workflow_info(self, file: str, repo: str | None = None) -> dict | None:
+        """GitHub's record of the workflow (state, created_at); None if it has none."""
+        return self._read(f"/actions/workflows/{file}", repo)
+
+    def newest_scheduled_run(self, file: str, repo: str | None = None) -> dict | None:
+        """The newest run the schedule started, in any status; None if none."""
+        got = self._read(f"/actions/workflows/{file}/runs?event=schedule&per_page=1", repo)
+        if got is None:
+            raise urllib.error.HTTPError(file, 404, "workflow runs not found", None, None)
+        runs = got["workflow_runs"]
+        return runs[0] if runs else None
+
+    def issue_comments(self, number: int, max_pages: int = 20) -> list[dict]:
+        """Every comment of the issue, oldest first, page by page to the end;
+        a listing cut at `max_pages` raises HistoryCut."""
+        out = []
+        for page in range(1, max_pages + 1):
+            batch = self.call("GET", f"/issues/{number}/comments?per_page={PER_PAGE}&page={page}")
+            out += batch
+            if len(batch) < PER_PAGE:
+                return out
+        raise HistoryCut(f"the comments of issue {number}")
+
+    def edit_body(self, number: int, body: str) -> None:
+        self.call("PATCH", f"/issues/{number}", {"body": body})
 
     def ci_runs(self) -> list[dict]:
         return self.workflow_runs(CI.workflow)
@@ -486,7 +756,7 @@ def notify(kind: str, facts: dict, env: dict, *, required: bool = False,
     if not (user and password and to):
         if required:
             print("[red-main] EMAIL-NOT-CONFIGURED (ALERT_* secrets missing) — "
-                  "the drill cannot prove delivery")
+                  "a required email (a drill, or the scheduled-workflows target) cannot be sent")
             return False
         print("[red-main] email not configured (ALERT_* secrets missing) — skipped")
         return True
@@ -781,6 +1051,109 @@ def _ordinary(gh: GitHub, env: dict, runs: list[dict], state: dict, issue: dict 
     return ok
 
 
+SCHEDULE_EMAIL = {"email_red": "email_stopped", "email_still_red": "email_still_stopped",
+                  "email_green": "email_running_again"}
+
+
+def run_schedules(gh: GitHub, env: dict, *, event: str, root: Path, mirror_repo: str | None,
+                  now: datetime | None = None, _smtp=smtplib.SMTP) -> int:
+    """The `schedules` target. Exit 0 = done; 1 = an email that should have
+    gone did not, or something could not be read (the fault path)."""
+    now = now or datetime.now(timezone.utc)
+    owner = env.get("GITHUB_REPOSITORY_OWNER", "")
+    problems: dict[str, str] = {}
+    unread: list[str] = []
+    for w in scheduled_workflows(root, mirror_repo):
+        if w.error:          # an unreadable schedule is never skipped: the fault path
+            print(f"[red-main] schedules: {w.key}: its schedule cannot be read ({w.error})")
+            unread.append(f"{w.key} (its schedule: {w.error})")
+            continue
+        try:
+            info = gh.workflow_info(w.file, w.repo)
+            newest = gh.newest_scheduled_run(w.file, w.repo) if info is not None else None
+        except Exception as exc:  # noqa: BLE001 — unknown is never "running"
+            unread.append(f"{w.key} ({type(exc).__name__})")
+            continue
+        why = judge(w, info, newest, now)
+        print(f"[red-main] schedules: {w.key}: "
+              + (f"STOPPED — {why}" if why else
+                 f"running (newest scheduled run {newest['created_at'] if newest else 'none yet'}; "
+                 f"threshold {_hours(threshold(w.slots))})"))
+        if why:
+            problems[w.key] = why
+    issue, comments, cut = None, [], None
+    if unread:
+        cut = "the schedule, state or scheduled runs of " + ", ".join(unread)
+    else:
+        try:
+            issue = gh.open_issue(SCHEDULES.title)
+            comments = gh.issue_comments(issue["number"]) if issue is not None else []
+        except Exception as exc:  # noqa: BLE001
+            cut = f"the open issue or its comments ({type(exc).__name__})"
+    if cut:   # a partial read is never taken as "all running": the fault path alone
+        try:
+            history_fault(gh, env, cut, target=SCHEDULES, event=event, owner=owner, _smtp=_smtp)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[red-main] the fault could not be handled ({type(exc).__name__})")
+        return 1
+    try:
+        ok = _schedules_ordinary(gh, env, problems, issue, comments, event=event, now=now,
+                                 owner=owner, _smtp=_smtp)
+    except Exception as exc:  # noqa: BLE001 — reported; the fault path still runs
+        print(f"[red-main] schedules: the alert itself failed ({type(exc).__name__}: {str(exc)[:160]})")
+        ok = False
+    try:
+        fault_ok = history_readable(gh, env, target=SCHEDULES, _smtp=_smtp)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[red-main] the fault issue could not be handled ({type(exc).__name__})")
+        fault_ok = False
+    return 0 if ok and fault_ok else 1
+
+
+def _schedules_ordinary(gh: GitHub, env: dict, problems: dict[str, str], issue: dict | None,
+                        comments: list[dict], *, event: str, now: datetime, owner: str,
+                        _smtp=smtplib.SMTP) -> bool:
+    """False when an email that should have gone did not: the run then fails
+    and red-main's heartbeat posts /fail. A lost email is reported by the
+    heartbeat, not retried (no pending state is kept across runs)."""
+    ok, red = True, bool(problems)
+    names = "; ".join(sorted(problems))
+    facts = {"names": names, "listing": _listing(problems), "run_url": _run_url(env)}
+    actions = decide(red=red, issue_open=issue is not None, event=event)
+    before = told_set(issue, comments) if issue is not None else None
+    if red and issue is not None and before != set(problems):
+        # ORDER: the comment (naming the new set) is the record; then the email;
+        # then the body. A failed comment raises: no email, the run fails. A body
+        # that will not update cannot repeat the email: the comment already told it.
+        facts.update(issue_url=issue["html_url"],
+                     before="; ".join(sorted(before)) if before is not None else "unknown")
+        gh.comment(issue["number"], f"{CHANGE_HEAD} Stopped now:\n{facts['listing']}\n\n"
+                                    f"Run: {facts['run_url']}\n\nStopped: {names}")
+        ok = notify("email_stopped_changed", facts, env, required=True, target=SCHEDULES,
+                    _smtp=_smtp)
+        gh.edit_body(issue["number"], schedules_body(problems))
+        actions = [a for a in actions if a not in ("comment", "email_still_red")]
+    print(f"[red-main] schedules: {len(problems)} stopped; issue {'open' if issue else 'none'}; "
+          f"event {event}; actions {actions or 'none'}")
+    for action in actions:
+        if action == "open":
+            issue = gh.create_issue(SCHEDULES.title, schedules_body(problems), owner)
+        elif action == "comment":
+            facts["days"] = days_red(issue["created_at"], now)
+            gh.comment(issue["number"], f"Still stopped — day {facts['days']}:\n{facts['listing']}\n\n"
+                                        f"Run: {facts['run_url']}")
+        elif action == "close":
+            gh.comment(issue["number"], f"Every scheduled workflow runs again: {facts['run_url']}")
+            gh.close(issue["number"])
+        else:
+            facts["issue_url"] = issue["html_url"]
+            # required: missing email settings are a lost email too (exit 1, the
+            # heartbeat's /fail), on this target only; the other five skip and say so
+            ok = notify(SCHEDULE_EMAIL[action], facts, env, required=True, target=SCHEDULES,
+                        _smtp=_smtp) and ok
+    return ok
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--drill", action="store_true",
@@ -789,14 +1162,19 @@ def main(argv: list[str] | None = None) -> int:
                     help="which workflow to watch (default: this repo's CI)")
     ap.add_argument("--repo", default=None,
                     help="OWNER/NAME of the public repository whose runs are "
-                         "read; required with --target mirror-verify")
+                         "read; required with --target mirror-verify and --target schedules")
     args = ap.parse_args(argv)
-    if args.target == "mirror-verify" and not args.repo:
-        ap.error("--target mirror-verify needs --repo OWNER/NAME (the mirror)")
+    if args.target in ("mirror-verify", "schedules") and not args.repo:
+        ap.error(f"--target {args.target} needs --repo OWNER/NAME (the mirror)")
     env = dict(os.environ)
     gh = GitHub(env["GITHUB_REPOSITORY"], env["GITHUB_TOKEN"],
                 api=env.get("GITHUB_API_URL", "https://api.github.com"))
     target = TARGETS[args.target]
+    if target is SCHEDULES:
+        if args.drill:
+            ap.error("--drill is not a schedules run")
+        return run_schedules(gh, env, event=env.get("GITHUB_EVENT_NAME", ""),
+                             root=Path(__file__).resolve().parents[1], mirror_repo=args.repo)
     return run(gh, env, event=env.get("GITHUB_EVENT_NAME", ""), drill=args.drill,
                target=target, watch_repo=args.repo,
                trigger=triggering_run(env, target, args.repo))

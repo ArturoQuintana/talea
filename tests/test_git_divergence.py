@@ -371,7 +371,7 @@ PINNED = {
     # the one job `test`: the append-only check, the suite, the ledger re-derivation
     "ci.yml": {"sha256": "9449318641307293190d42b614fd413bd8c0b8d9b5b0c6f72991e25099b370b5", "writes": None},
     # WRITER: ERCOT's ladder; commits and pushes Data/ercot
-    "ercot.yml": {"sha256": "7afa79f68ab0214600b3df7f755623dfc1ab8513d2c9e5c3f7de605d889b14a0", "writes": "ercot"},
+    "ercot.yml": {"sha256": "7bb5c189b7927e47c7f3d687ec39dc291c610e944e2fffc8425f4f85beac7709", "writes": "ercot"},
     # WRITER: JP's ladder; commits and pushes Data/jp
     "jp.yml": {"sha256": "150178f7fa4b5c27aedb0216f8e22fb90e7a5601bcd6f9d03e5a2d57f2508c94", "writes": "jp"},
     # read-only: every registered market still reaches origin
@@ -381,7 +381,7 @@ PINNED = {
     # read-only: when each receipt reached GitHub, against its deadline (register T-35)
     "receipt-push-times.yml": {"sha256": "01e4f4b8038d329f3b2228159bbfa8d2df4155febda3f0842a86b719c6985f9d", "writes": None},
     # read-only on the repository: the red-main alert (issues and email)
-    "red-main.yml": {"sha256": "a34363158715a6cfe65c3691703615b9631b52008a56fc1560bb9afb49e507a8", "writes": None},
+    "red-main.yml": {"sha256": "b3570b9012844dc179823fedd9f636aa531787dc7fdee81173ee97533a70b816", "writes": None},
 }
 # workflow file -> the market it writes. The behaviour tests below run for
 # exactly these; that a file is a writer is a fact written in the table by a

@@ -462,7 +462,7 @@ def test_a_red_freshness_run_opens_its_own_issue_and_says_what_red_means():
     assert _go(gh, "workflow_run", target=rma.FRESHNESS) == 0
     assert gh.log == [("create", rma.FRESHNESS.title, "owner")]
     assert gh.read == ("mirror-freshness.yml", None)
-    assert len({t.title for t in rma.TARGETS.values()}) == len(rma.TARGETS) == 5
+    assert len({t.title for t in rma.TARGETS.values()}) == len(rma.TARGETS) == 6
     assert "mirror freshness RED on the mirror" in FakeSMTP.sent[-1]["Subject"]
     still = rma.build_email("email_still_red", {"days": 1, "failed_runs": 3},
                             sender="a@example.test", to="b@example.test", target=rma.FRESHNESS)

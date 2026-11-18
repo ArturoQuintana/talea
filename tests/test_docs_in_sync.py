@@ -299,6 +299,7 @@ def test_every_alert_channel_states_whether_the_operator_confirmed_it():
         "ntfy": "ntfy.sh" in tick or "ntfy.sh" in routines,
         "heartbeat": "ESIOS_HEARTBEAT_URL" in shell,
         "email": "smtplib" in shell,
+        "red-main heartbeat": "RED_MAIN_HEARTBEAT_URL" in _private_text(".github/workflows/red-main.yml"),
     }
     assert any(senders.values()), "no sender found — has the alert code moved?"
     rows = _alert_channel_rows(_private_text("INFRA.md"))
