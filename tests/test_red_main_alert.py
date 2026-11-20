@@ -374,8 +374,9 @@ def test_mirror_runs_are_read_without_the_token_when_github_refuses_it():
 
 def test_red_main_workflow_is_wired_and_read_only():
     text = private_file(".github/workflows/red-main.yml").read_text()
-    assert re.search(r"workflow_run:\s*\n\s*workflows: \[ci, origin-liveness, mirror-freshness, receipt-push-times\]",
-                     text), "must run after every CI, origin-liveness, mirror-freshness and receipt-push-times run"
+    assert re.search(r"workflow_run:\s*\n\s*workflows: \[ci, origin-liveness, mirror-freshness, receipt-push-times, "
+                     r"write-gap, stamp-margin\]", text), \
+        "must run after every CI, origin-liveness, mirror-freshness, receipt-push-times, write-gap and stamp-margin run"
     assert "branches: [main]" in text
     assert re.search(r'- cron:\s*"\d+ \d+ \* \* \*"', text), "must repeat daily while red"
     assert "workflow_dispatch" in text and "--drill" in text, "must be drillable on demand"
@@ -462,7 +463,7 @@ def test_a_red_freshness_run_opens_its_own_issue_and_says_what_red_means():
     assert _go(gh, "workflow_run", target=rma.FRESHNESS) == 0
     assert gh.log == [("create", rma.FRESHNESS.title, "owner")]
     assert gh.read == ("mirror-freshness.yml", None)
-    assert len({t.title for t in rma.TARGETS.values()}) == len(rma.TARGETS) == 6
+    assert len({t.title for t in rma.TARGETS.values()}) == len(rma.TARGETS) == 8
     assert "mirror freshness RED on the mirror" in FakeSMTP.sent[-1]["Subject"]
     still = rma.build_email("email_still_red", {"days": 1, "failed_runs": 3},
                             sender="a@example.test", to="b@example.test", target=rma.FRESHNESS)

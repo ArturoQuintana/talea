@@ -249,6 +249,7 @@ def test_the_real_scheduled_workflows_are_read_with_the_approved_thresholds():
     hours = {k: rma.threshold(w.slots).total_seconds() / 3600 for k, w in got.items()}
     assert hours == {"ercot.yml": 32, "jp.yml": pytest.approx(33.6), "liveness.yml": 40,
                      "mirror-freshness.yml": 34, "receipt-push-times.yml": 40, "red-main.yml": 40,
+                     "stamp-margin.yml": 40, "write-gap.yml": 40,
                      "verify.yml (on ArturoQuintana/talea)": 40}
     assert "ci.yml" not in got
 
@@ -666,7 +667,7 @@ def test_the_heartbeat_step_is_last_runs_always_and_reads_red_mains_own_outcome(
 
 
 def test_heartbeat_only_a_monitoring_run_on_main_pings_at_all(tmp_path):
-    """A drill skips the six targets and another ref does not watch main:
+    """A drill skips the eight targets and another ref does not watch main:
     neither may reset the check, and neither posts /fail."""
     for ref, drill in (("refs/heads/other", "false"), ("refs/heads/main", "true"),
                        ("refs/tags/v0", "false"), ("", "false")):

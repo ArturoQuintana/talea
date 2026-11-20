@@ -22,7 +22,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from conftest import private_file
+from conftest import github_shell, private_file, workflow_steps
 
 ROOT = Path(__file__).resolve().parents[1]
 _SPEC = importlib.util.spec_from_file_location(
@@ -140,6 +140,34 @@ def test_unverifiable_wins_over_cannot_judge(repo, capsys):
     _append(repo, _receipt("2026-11-15", "2026-11-15T10:00:01+00:00"))       # never pushed
     rc, out = _run(repo, _get([_push("2026-11-15T23:00:00Z", start, a)]), capsys)
     assert rc == 1 and "UNVERIFIABLE 1, CANNOT JUDGE 1" in out
+    # exit 1 wins, so the run says that it also could not judge (T3 AND T4: register T-41):
+    # the receipt never pushed, and the history that ends before the window
+    assert out.splitlines()[-1] == "[push-times] also CANNOT JUDGE: 2"
+
+
+def test_the_also_line_counts_every_item_that_could_not_be_judged_and_only_with_exit_1(repo, capsys):
+    """Register T-41 (a): the also-line names a T4 inside a T3 run. It counts a
+    commit that cannot be told, a receipt with no push and a history that ends
+    before the window; it never appears with exit 2 (the result line says it
+    then) or with exit 0, and information before the start date is not in it."""
+    start = _git(repo, "rev-parse", "HEAD")
+    a = _append(repo, _receipt("2026-11-14", "2026-11-14T10:00:01+00:00"))
+    b = _append(repo, _receipt("2026-11-15", "2026-11-15T10:00:01+00:00"))
+    _append(repo, _receipt("2026-11-15", "2026-11-15T10:00:02+00:00", "battery-2h2h-weekly"))  # never pushed
+    get = _get([_push("2026-11-15T23:00:00Z", a, b), _push("2026-11-14T10:01:00Z", start, a)])
+    rc, out = _run(repo, get, capsys, days=7)
+    assert rc == 1 and out.splitlines()[-1] == "[push-times] also CANNOT JUDGE: 2"   # 1 receipt + the short history
+    rc, out = _run(repo, _get([_push("2026-11-14T10:01:00Z", start, a)]), capsys)
+    assert rc == 2 and "also CANNOT JUDGE" not in out                                # no T3: the result says it
+    c = _git(repo, "rev-parse", "HEAD")
+    rc, out = _run(repo, _get([_push("2026-11-15T10:30:00Z", a, c), _push("2026-11-14T10:01:00Z", start, a),
+                               _push("2026-11-01T00:00:00Z", "", start)]), capsys)
+    assert rc == 0 and "also" not in out
+    rc = cpt.run(repo, "o/r", "HEAD", NOW, 7, MARKETS, "tok", start=datetime(2026, 11, 15, 12, tzinfo=timezone.utc),
+                 get=_get([_push("2026-11-15T23:00:00Z", a, c), _push("2026-11-14T10:01:00Z", start, a),
+                           _push("2026-11-01T00:00:00Z", "", start)]))
+    out = capsys.readouterr().out
+    assert rc == 1 and "also" not in out                 # nothing that sets the verdict was CANNOT JUDGE
 
 
 def test_the_earliest_push_that_delivered_a_commit_counts(repo, capsys):
@@ -309,7 +337,7 @@ def test_a_push_naming_a_commit_this_clone_lacks(repo, capsys):
 def test_main_needs_a_repository_and_reads_the_environment(monkeypatch):
     seen = {}
     monkeypatch.setattr(cpt, "run", lambda repo_dir, repo, ref, now, days, markets, token, get=None, start=None,
-                        until=None: seen.update(repo=repo, ref=ref, days=days, token=token, markets=markets,
+                        until=None, items=None: seen.update(repo=repo, ref=ref, days=days, token=token, markets=markets,
                                                 start=start, until=until) or 0)
     monkeypatch.setattr(cpt, "_registry", lambda: MARKETS)
     monkeypatch.delenv("GITHUB_REPOSITORY", raising=False)
@@ -793,10 +821,15 @@ def _workflow() -> str:
     return private_file(".github/workflows/receipt-push-times.yml").read_text()
 
 
+def _check_step() -> dict:
+    return next(s for s in workflow_steps(_workflow()) if s["name"] == "Every receipt reached GitHub before its deadline")
+
+
 def _step_script() -> str:
-    text = _workflow()
-    block = text.split("        run: |\n", 1)[1]
-    return "\n".join(l[10:] for l in block.splitlines() if l.startswith("          "))
+    """The check step's script, as conftest.workflow_steps reads it. (The
+    earlier reader took every deeper-indented line after `run: |`, the next
+    step's env lines included; they sat after `exit`, so they never ran.)"""
+    return _check_step()["run"]
 
 
 def test_the_workflow_is_read_only_daily_and_runs_the_check_as_tested():
@@ -807,26 +840,28 @@ def test_the_workflow_is_read_only_daily_and_runs_the_check_as_tested():
     assert "fetch-depth: 0" in text                                     # never a shallow clone
     script = _step_script()
     assert ('uv run --no-project python -I scripts/check_receipt_push_times.py \\\n'
-            '  --repo "$GITHUB_REPOSITORY" --ref origin/main --days 7 --since 2026-11-11 --until "$until" '
-            '2>&1 | tee "$log"') in script
+            '  --repo "$GITHUB_REPOSITORY" --ref origin/main --days 7 --since 2026-11-11 --until "$until" \\\n'
+            '  --items "$RUNNER_TEMP/items.txt" 2>&1 | tee "$log"') in script
     assert script.index('until="$(date') < script.index("git fetch")    # noted BEFORE the fetch
     assert "rolls past this" in text and "2026-11-18" in text            # the start date's reach, said
 
 
-def _run_step(tmp_path, check_exit: int, last_line: str | None):
+def _run_step(tmp_path, check_exit: int, last_line: str | None, before: str = "[push-times] es: ..."):
     """The step's script, as GitHub runs it (bash -eo pipefail), with stand-ins
-    for date, git and uv (uv prints `last_line`, if any, and exits
-    `check_exit`), recording the order they were called in."""
+    for date, git and uv (uv prints `before`, then `last_line`, if any, and
+    exits `check_exit`), recording the order they were called in."""
     bin_ = tmp_path / "bin"
     bin_.mkdir()
     log = tmp_path / "calls.log"
     say = f'echo "{last_line}"; ' if last_line else ""
     for name, body in (("date", 'echo "date $*" >> "$LOG"; echo 2026-11-17T18:23:03Z'),
                        ("git", 'echo "git $*" >> "$LOG"'),
-                       ("uv", f'echo "uv $*" >> "$LOG"; echo "[push-times] es: ..."; {say}exit {check_exit}')):
+                       ("uv", f'echo "uv $*" >> "$LOG"; echo "{before}"; {say}exit {check_exit}')):
         (bin_ / name).write_text(f"#!/bin/sh\n{body}\n")
         (bin_ / name).chmod(0o755)
-    r = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", _step_script()],
+    step = _check_step()
+    assert step["shell"] == "bash"                                  # pipefail (register T-41)
+    r = subprocess.run([*github_shell(step), step["run"]],          # as GitHub runs it
                        capture_output=True, text=True, env={"PATH": f"{bin_}:/usr/bin:/bin", "LOG": str(log),
                                                             "GITHUB_REPOSITORY": "o/r", "RUNNER_TEMP": str(tmp_path)})
     return r, log.read_text().splitlines()
@@ -856,6 +891,24 @@ def test_the_step_notes_the_time_before_fetching_and_trusts_only_the_checks_last
         assert trigger in r.stdout
     else:
         assert "TRIGGER" not in r.stdout
+
+
+@pytest.mark.parametrize("before, check_exit, last, step_exit, label", [
+    ("[push-times] also CANNOT JUDGE: 3", 1, "[push-times] result: UNVERIFIABLE", 1,
+     "TRIGGER T3 (UNVERIFIABLE) and TRIGGER T4 (CANNOT JUDGE)"),
+    # only the check's own whole line counts, never a look-alike
+    ("[push-times] es: also CANNOT JUDGE: 3", 1, "[push-times] result: UNVERIFIABLE", 1, None),
+    ("[push-times] also CANNOT JUDGE: 3 x", 1, "[push-times] result: UNVERIFIABLE", 1, None),
+])
+def test_a_t4_inside_a_t3_run_is_labelled_both(tmp_path, before, check_exit, last, step_exit, label):
+    """Register T-41 (a): exit 1 wins over 2, and the run used to be labelled T3
+    only. With the check's also-line, the label names T3 and T4."""
+    r, _ = _run_step(tmp_path, check_exit, last, before=before)
+    assert r.returncode == step_exit, (r.stdout, r.stderr)
+    if label:
+        assert label in r.stdout
+    else:
+        assert "TRIGGER T3 (UNVERIFIABLE): report" in r.stdout and "TRIGGER T4" not in r.stdout
 
 
 def test_entry_prints_the_result_line_and_never_exits_1_for_a_crash(monkeypatch, capsys):

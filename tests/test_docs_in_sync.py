@@ -300,6 +300,8 @@ def test_every_alert_channel_states_whether_the_operator_confirmed_it():
         "heartbeat": "ESIOS_HEARTBEAT_URL" in shell,
         "email": "smtplib" in shell,
         "red-main heartbeat": "RED_MAIN_HEARTBEAT_URL" in _private_text(".github/workflows/red-main.yml"),
+        "trigger checks": any("scripts/trigger_email.py" in _private_text(f".github/workflows/{w}")
+                              for w in ("receipt-push-times.yml", "write-gap.yml", "stamp-margin.yml")),
     }
     assert any(senders.values()), "no sender found — has the alert code moved?"
     rows = _alert_channel_rows(_private_text("INFRA.md"))

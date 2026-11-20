@@ -32,7 +32,12 @@ reaching origin — the class the server cannot see from its own clone (incident
 `--target liveness` reports it; same rules. Later targets, on the same rules:
 `--target freshness` (the public mirror's freshness, register T-28) and
 `--target push-times` (when each receipt reached GitHub, register T-35:
-.github/workflows/receipt-push-times.yml).
+.github/workflows/receipt-push-times.yml), and since register T-41 (2026-11)
+`--target write-gap` (D-36's trigger T1, write-gap.yml) and `--target
+stamp-margin` (T2, stamp-margin.yml): one issue per trigger check, so a
+chronic trigger never hides another kind (ruled 2026-11-20, C1). Each of the
+three trigger checks also emails the operator its own list when its run is red
+(C2); red-main's rules for them are those of every run target.
 
 A FAILURE A NEWER GREEN RUN HID (register T-38, 2026-11-16): the state is the
 newest decisive run, so a failed run F followed by a green run G before F's
@@ -201,6 +206,27 @@ PUSH_TIMES = Target(
     "with no push in the record, a push history unreadable or not reaching back, a partial or "
     "shallow clone, or a reset main. A failed step before the check: the check did not run. "
     "The next successful run closes this issue.")
+_TRIGGER_WHY = (
+    "Red can mean either; the run log is the authority, and the run's own email lists what set "
+    "the verdict, newest first. {what} (exit 1, D-36 trigger {trig}): a reconsideration trigger, "
+    "which reopens D-36 for the operator's decision and changes no rule by itself. {health} "
+    "(exit 2, not a trigger): detector health; it never reopens D-36. A failed step before the "
+    "check: the check did not run. The next successful run closes this issue.")
+WRITE_GAP = Target(
+    "write-gap.yml", "The write-gap check (T1) is red", "write gap (T1)", "on origin",
+    "The write-gap check (T1)", "write gap",
+    _TRIGGER_WHY.format(
+        trig="T1", what="TRIGGER T1: a write gap logged at 100 ms or more in the commit that carried "
+        "a receipt (the logged upper bound, compared as logged)",
+        health="T1 CANNOT JUDGE: a receipt commit with no write-gap line, or one that says \"not "
+        "measured\"; CANNOT JUDGE: a history the check could not read"))
+STAMP_MARGIN = Target(
+    "stamp-margin.yml", "The stamp-margin check (T2) is red", "stamp margin (T2)", "on origin",
+    "The stamp-margin check (T2)", "stamp margin",
+    _TRIGGER_WHY.format(
+        trig="T2", what="TRIGGER T2: a receipt stamped 60 s or less before its market's deadline",
+        health="CANNOT JUDGE: a receipt without a readable stamp or day, or a history the check could "
+        "not read"))
 SCHEDULES = Target(
     "(every scheduled workflow)", "A scheduled workflow has stopped running",
     "scheduled workflows", "", "A scheduled workflow", "schedules",
@@ -208,7 +234,8 @@ SCHEDULES = Target(
     "schedule; a writer's market misses its receipts, a detector's class goes "
     "unwatched. The issue lists each stopped workflow and why.")
 TARGETS = {"ci": CI, "mirror-verify": MIRROR_VERIFY, "liveness": LIVENESS, "freshness": FRESHNESS,
-           "push-times": PUSH_TIMES, "schedules": SCHEDULES}
+           "push-times": PUSH_TIMES, "schedules": SCHEDULES, "write-gap": WRITE_GAP,
+           "stamp-margin": STAMP_MARGIN}
 
 TITLE = CI.title
 DRILL_TITLE = "[DRILL] CI is red on main — delivery test"

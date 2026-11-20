@@ -371,17 +371,21 @@ PINNED = {
     # the one job `test`: the append-only check, the suite, the ledger re-derivation
     "ci.yml": {"sha256": "9449318641307293190d42b614fd413bd8c0b8d9b5b0c6f72991e25099b370b5", "writes": None},
     # WRITER: ERCOT's ladder; commits and pushes Data/ercot
-    "ercot.yml": {"sha256": "7bb5c189b7927e47c7f3d687ec39dc291c610e944e2fffc8425f4f85beac7709", "writes": "ercot"},
+    "ercot.yml": {"sha256": "a8e64d775ae9016020be8d886404ebd9b9b0ff6a0d4cd1729d619201d7f92672", "writes": "ercot"},
     # WRITER: JP's ladder; commits and pushes Data/jp
-    "jp.yml": {"sha256": "150178f7fa4b5c27aedb0216f8e22fb90e7a5601bcd6f9d03e5a2d57f2508c94", "writes": "jp"},
+    "jp.yml": {"sha256": "6d0b52c5f2ef8d96d2c29f0a22e58c34ee647fbacd54eae3b2eb18ace4c2d9c8", "writes": "jp"},
     # read-only: every registered market still reaches origin
     "liveness.yml": {"sha256": "a479901cc898052651cc5ff522a9fcb8c16bdd464cd131fdf05da7cf5cc109af", "writes": None},
     # read-only: the public mirror is still being published after the server's windows
     "mirror-freshness.yml": {"sha256": "c0498891fd7852ea403627594f6c0b435243bc5eeae66025588e33ed3d118a24", "writes": None},
     # read-only: when each receipt reached GitHub, against its deadline (register T-35)
-    "receipt-push-times.yml": {"sha256": "01e4f4b8038d329f3b2228159bbfa8d2df4155febda3f0842a86b719c6985f9d", "writes": None},
+    "receipt-push-times.yml": {"sha256": "163041dfab1ed9da37ed528941072195074069a2dd9d04856f969ee41de0ae9e", "writes": None},
     # read-only on the repository: the red-main alert (issues and email)
-    "red-main.yml": {"sha256": "b3570b9012844dc179823fedd9f636aa531787dc7fdee81173ee97533a70b816", "writes": None},
+    "red-main.yml": {"sha256": "0d7cf3eddc7b3289c2a03989e109c910e5aa9a20f693c795d18dd81db118cd1d", "writes": None},
+    # read-only: D-36's trigger T2, a receipt stamped within 60 s of its deadline (register T-41)
+    "stamp-margin.yml": {"sha256": "3d404f38929485c1f74cdb60755698ee91ba7b7f1a0b50154c4c7b104e1d56d8", "writes": None},
+    # read-only: D-36's trigger T1, a write gap of 100 ms or more (register T-41)
+    "write-gap.yml": {"sha256": "be34e6da2d6bdd5e381a931bafb34c92e27c09ad69665d94c672470897141ae7", "writes": None},
 }
 # workflow file -> the market it writes. The behaviour tests below run for
 # exactly these; that a file is a writer is a fact written in the table by a
@@ -414,21 +418,20 @@ def test_in_the_private_repository_the_workflow_tests_never_skip():
     assert [p.name for p in paths] == sorted(PINNED)
 
 
+def _step(workflow: str, prefix: str) -> dict:
+    """The workflow's one step whose name starts with `prefix`, as
+    conftest.workflow_steps reads it (its name, its `shell:`, its script)."""
+    _private_workflows()
+    found = [s for s in conftest.workflow_steps((WORKFLOWS / workflow).read_text())
+             if (s["name"] or "").startswith(prefix)]
+    assert len(found) == 1, f"{workflow}: expected exactly one {prefix!r} step"
+    assert found[0]["run"], f"{workflow}: the step {prefix!r} lost its script"
+    return found[0]
+
+
 def _commit_step(workflow: str) -> str:
     """The `run: |` script of the workflow's "Commit & push" step, verbatim."""
-    _private_workflows()
-    lines = (WORKFLOWS / workflow).read_text().splitlines()
-    at = [i for i, l in enumerate(lines) if l.strip().startswith("- name: Commit & push")]
-    assert len(at) == 1, f"{workflow}: expected exactly one 'Commit & push' step"
-    run = lines[at[0] + 1]
-    assert run.strip() == "run: |", f"{workflow}: the commit step lost its script"
-    indent = len(run) - len(run.lstrip())
-    body = []
-    for l in lines[at[0] + 2:]:
-        if l.strip() and len(l) - len(l.lstrip()) <= indent:
-            break
-        body.append(l)
-    return textwrap.dedent("\n".join(body)) + "\n"
+    return _step(workflow, "Commit & push")["run"]
 
 
 # What a tick leaves in a market's folder, as bytes. A FULL pass: two appended
@@ -505,9 +508,11 @@ def _runner(tmp_path: Path, slug: str, *, server_changes_lock: bool,
 
 
 def _run_commit_step(workflow: str, runner: Path) -> subprocess.CompletedProcess:
-    """Run the step as Actions does (`bash -e`), with its retry sleep made
-    instant; the script itself is not altered."""
-    return subprocess.run(["bash", "-e", "-c", "sleep() { :; }\n" + _commit_step(workflow)],
+    """Run the step as Actions does (the shell GitHub uses for it: see
+    conftest.github_shell), with its retry sleep made instant; the script
+    itself is not altered."""
+    step = _step(workflow, "Commit & push")
+    return subprocess.run([*conftest.github_shell(step), "sleep() { :; }\n" + step["run"]],
                           cwd=runner, capture_output=True, text=True)
 
 
@@ -755,6 +760,235 @@ def _workflow_files(root: Path = ROOT) -> list[Path]:
 
 def _on_disk(root: Path = ROOT) -> dict[str, str]:
     return {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in _workflow_files(root)}
+
+
+# --- the runners' write-gap line (register T-41) ---------------------------
+# The write-gap check (T1) reads the gap from the commit that carried a receipt.
+# The server's Data commit has carried it since 2026-11-16; a runner's commit
+# carries it from the tick's own line, kept by the tick step, in the server's
+# format. These run the commit step as Actions does, with RUNNER_TEMP set.
+
+def _write_gap_check():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("check_deadline_margins",
+                                                  Path(__file__).resolve().parents[1] / "scripts" / "check_deadline_margins.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _tick_line(slug: str, gap_ns: int | None, capsys) -> str:
+    """The tick's own line, from the tick's own code (talea.__main__)."""
+    capsys.readouterr()
+    receipts = Path("/nonexistent/receipts.jsonl")
+    orig = cli.last_write_gap
+    try:
+        cli.last_write_gap = lambda _p: gap_ns
+        cli._gap_line(slug, receipts, {"committed": 1})
+    finally:
+        cli.last_write_gap = orig
+    return capsys.readouterr().out
+
+
+def _run_commit_step_with(workflow: str, runner: Path, temp: Path | None) -> subprocess.CompletedProcess:
+    env = {k: v for k, v in os.environ.items() if k != "RUNNER_TEMP"}
+    if temp is not None:
+        env["RUNNER_TEMP"] = str(temp)
+    step = _step(workflow, "Commit & push")
+    return subprocess.run([*conftest.github_shell(step), "sleep() { :; }\n" + step["run"]],
+                          cwd=runner, capture_output=True, text=True, env=env)
+
+
+def _origin_body(tmp_path: Path, origin: Path) -> tuple[str, str]:
+    check = tmp_path / f"body{len(list(tmp_path.glob('body*')))}"
+    subprocess.run(["git", "clone", "-q", "-b", "main", str(origin), str(check)], check=True, capture_output=True)
+    return _git(check, "log", "-1", "--format=%s"), _git(check, "log", "-1", "--format=%b")
+
+
+@pytest.mark.parametrize("workflow", sorted(WRITER_WORKFLOWS))
+@pytest.mark.parametrize("gap_ns, expected", [(3_000_000, 13), (95_000_000, 105), (None, "not measured"),
+                                               (-20_000_000, "not measured")])
+def test_a_runners_receipt_commit_carries_the_ticks_write_gap_in_the_servers_format(
+        tmp_path, capsys, workflow, gap_ns, expected):
+    slug = WRITER_WORKFLOWS[workflow]
+    origin, runner = _runner(tmp_path, slug, server_changes_lock=False)
+    temp = tmp_path / "temp"
+    temp.mkdir()
+    (temp / "tick.log").write_text(f"[esios-paper:{slug}] other output\n" + _tick_line(slug, gap_ns, capsys))
+    r = _run_commit_step_with(workflow, runner, temp)
+    assert r.returncode == 0, r.stdout + r.stderr
+    subject, body = _origin_body(tmp_path, origin)
+    assert re.fullmatch(rf"data: {slug} tick \d{{4}}-\d{{2}}-\d{{2}}", subject)      # the subject is unchanged
+    assert body.startswith("Write gap, last receipt per file (assumes the file clock lags ≤10 ms and the clock "
+                           "did not step; register T-35): " + slug + " "), body
+    assert _write_gap_check().gap_ms(body, slug) == expected                         # what T1 reads
+
+
+@pytest.mark.parametrize("workflow", sorted(WRITER_WORKFLOWS))
+@pytest.mark.parametrize("temp_kind", ["no RUNNER_TEMP", "no tick.log", "a tick.log without the line"])
+def test_without_the_ticks_line_a_receipt_commit_says_not_measured(tmp_path, workflow, temp_kind):
+    """Then the write-gap check reports T1 CANNOT JUDGE (detector health),
+    never a silent pass; the push itself is unaffected."""
+    slug = WRITER_WORKFLOWS[workflow]
+    origin, runner = _runner(tmp_path, slug, server_changes_lock=False)
+    temp = None if temp_kind == "no RUNNER_TEMP" else tmp_path / "temp"
+    if temp is not None:
+        temp.mkdir()
+        if temp_kind != "no tick.log":
+            (temp / "tick.log").write_text(f"[esios-paper:{slug}] write gap: not measured (ValueError)\n")
+    r = _run_commit_step_with(workflow, runner, temp)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert _delivered(tmp_path, origin, slug, r, runner)
+    _, body = _origin_body(tmp_path, origin)
+    assert body == f"Write gap, last receipt per file (register T-35): {slug} not measured (no line from the tick)"
+    assert _write_gap_check().gap_ms(body, slug) == "not measured"
+
+
+@pytest.mark.parametrize("workflow", sorted(WRITER_WORKFLOWS))
+def test_a_runners_commit_without_a_receipt_carries_no_write_gap(tmp_path, capsys, workflow):
+    """A pass that only settles and stamps writes no receipt: no gap is
+    claimed, even when an earlier line is in the log."""
+    slug = WRITER_WORKFLOWS[workflow]
+    origin, runner = _runner(tmp_path, slug, server_changes_lock=False, output=SETTLES_ONLY)
+    temp = tmp_path / "temp"
+    temp.mkdir()
+    (temp / "tick.log").write_text(_tick_line(slug, 3_000_000, capsys))
+    r = _run_commit_step_with(workflow, runner, temp)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert _origin_body(tmp_path, origin)[1] == ""
+
+
+@pytest.mark.parametrize("workflow", sorted(WRITER_WORKFLOWS))
+def test_the_tick_step_keeps_its_output_for_the_commit_step(workflow):
+    slug = WRITER_WORKFLOWS[workflow]
+    step = _step(workflow, f"{slug.upper()} tick")
+    assert step["run"] == (f'uv run --no-dev python -m talea tick --market {slug} '
+                           '| { tee "$RUNNER_TEMP/tick.log" || true; cat >/dev/null; }')
+
+
+def _stand_in(tmp_path: Path, exit_code: int, temp: Path | None = None, *, lines: int = 1,
+              tee_quits: bool = False) -> dict:
+    """PATH with a `uv` that prints `lines` lines (with the shell's own printf,
+    so a broken pipe kills it as SIGPIPE would kill the tick) and exits
+    `exit_code`; with `tee_quits`, a `tee` that exits at once without reading.
+    RUNNER_TEMP is `temp` (default: tmp_path)."""
+    bin_ = tmp_path / ("bin-quits" if tee_quits else "bin")
+    bin_.mkdir(exist_ok=True)
+    (bin_ / "uv").write_text("#!/bin/sh\ni=0\n"
+                             f"while [ $i -lt {lines} ]; do printf '%s\\n' 'tick output'; i=$((i+1)); done\n"
+                             f"exit {exit_code}\n")
+    (bin_ / "uv").chmod(0o755)
+    if tee_quits:
+        (bin_ / "tee").write_text("#!/bin/sh\nexit 1\n")
+        (bin_ / "tee").chmod(0o755)
+    return {"PATH": f"{bin_}:/usr/bin:/bin", "RUNNER_TEMP": str(temp or tmp_path)}
+
+
+@pytest.mark.parametrize("workflow", sorted(WRITER_WORKFLOWS))
+def test_a_failed_tick_fails_its_step_under_the_shell_github_uses(tmp_path, workflow):
+    """Found by the PO before review (register T-41): with no `shell:` GitHub
+    runs `bash -e {0}`, without pipefail, so `tick | tee` took tee's status and
+    a failed tick passed: no failure email, and the commit step ran. Run as
+    GitHub runs it, the step must fail when the tick fails, and pass, keeping
+    the output, when it succeeds."""
+    slug = WRITER_WORKFLOWS[workflow]
+    step = _step(workflow, f"{slug.upper()} tick")
+    r = subprocess.run([*conftest.github_shell(step), step["run"]], capture_output=True, text=True,
+                       env=_stand_in(tmp_path, 1))
+    assert r.returncode != 0, "a failed tick must fail the step"
+    r = subprocess.run([*conftest.github_shell(step), step["run"]], capture_output=True, text=True,
+                       env=_stand_in(tmp_path, 0))
+    assert r.returncode == 0 and (tmp_path / "tick.log").read_text() == "tick output\n"
+    # the class: under GitHub's default shell the same pipe passes a failed tick
+    r = subprocess.run([*conftest.GITHUB_BASH[None], step["run"]], capture_output=True, text=True,
+                       env=_stand_in(tmp_path, 1))
+    assert r.returncode == 0
+
+
+PIPE = re.compile(r"(?<!\|)\|(?!\|)\s+[A-Za-z_./${(]")    # `a | b`, `a | { b; }`; never `||` nor a case's "x"|"y"
+
+
+@pytest.mark.parametrize("workflow", sorted(WRITER_WORKFLOWS))
+def test_a_failing_tee_never_stops_a_good_tick_and_its_receipts_still_go(tmp_path, workflow):
+    """Ruled in review (round 1): the gap telemetry must never stop a writer.
+    With pipefail, a tee that cannot write its log (here RUNNER_TEMP does not
+    exist) would fail a good tick's step, skip the commit step, and lose the
+    receipts. The step's status is the tick's alone, and the commit step then
+    pushes everything, its body saying "not measured"."""
+    slug = WRITER_WORKFLOWS[workflow]
+    step = _step(workflow, f"{slug.upper()} tick")
+    gone = tmp_path / "no-such-folder"
+    r = subprocess.run([*conftest.github_shell(step), step["run"]], capture_output=True, text=True,
+                       env=_stand_in(tmp_path, 0, gone))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "tick output" in r.stdout                                  # the log still reaches the job's output
+    r = subprocess.run([*conftest.github_shell(step), step["run"]], capture_output=True, text=True,
+                       env=_stand_in(tmp_path, 3, gone))
+    assert r.returncode == 3, "a failed tick fails the step with the tick's own status"
+    origin, runner = _runner(tmp_path, slug, server_changes_lock=False)
+    c = _run_commit_step_with(workflow, runner, gone)                  # the next step runs, and delivers
+    assert c.returncode == 0, c.stdout + c.stderr
+    assert _delivered(tmp_path, origin, slug, c, runner)
+    assert _origin_body(tmp_path, origin)[1].endswith(f"{slug} not measured (no line from the tick)")
+
+
+@pytest.mark.parametrize("workflow", sorted(WRITER_WORKFLOWS))
+def test_a_tee_that_exits_at_once_never_kills_the_tick(tmp_path, workflow):
+    """Round 2 (Codex): a tee killed, or with its own output broken, leaves the
+    pipe without a reader; a tick still writing then dies of SIGPIPE and the
+    step fails, the same harm. The reader after tee keeps draining. The tick
+    here writes far more than a pipe holds, after tee has already gone."""
+    slug = WRITER_WORKFLOWS[workflow]
+    step = _step(workflow, f"{slug.upper()} tick")
+    env = _stand_in(tmp_path, 0, lines=20000, tee_quits=True)
+    r = subprocess.run([*conftest.github_shell(step), step["run"]], capture_output=True, text=True, env=env,
+                       timeout=60)
+    assert r.returncode == 0, r.stderr
+    r = subprocess.run([*conftest.github_shell(step), step["run"]], capture_output=True, text=True,
+                       env=_stand_in(tmp_path, 3, lines=20000, tee_quits=True), timeout=60)
+    assert r.returncode == 3, "a failed tick fails the step with the tick's own status, tee gone or not"
+    # the shape this replaces: without the reader, the good tick dies of SIGPIPE
+    old = step["run"].replace(" cat >/dev/null;", "")
+    r = subprocess.run([*conftest.github_shell(step), old], capture_output=True, text=True, env=env, timeout=60)
+    assert r.returncode != 0
+    origin, runner = _runner(tmp_path, slug, server_changes_lock=False)
+    c = _run_commit_step_with(workflow, runner, tmp_path)              # no tick.log: tee never wrote it
+    assert c.returncode == 0, c.stdout + c.stderr
+    assert _delivered(tmp_path, origin, slug, c, runner)
+    assert _origin_body(tmp_path, origin)[1].endswith(f"{slug} not measured (no line from the tick)")
+
+
+def _pipes_without_pipefail(text: str) -> list[str]:
+    """The steps of a workflow whose script holds a pipe while GitHub runs it
+    without pipefail (no `shell: bash`, no `set -o pipefail` first)."""
+    bad = []
+    for s in conftest.workflow_steps(text):
+        script = "\n".join(l for l in (s["run"] or "").splitlines() if not l.lstrip().startswith("#"))
+        if PIPE.search(script) and s["shell"] != "bash" and not re.match(
+                r"\s*set -(e?o pipefail|o pipefail)", script):
+            bad.append(s["name"] or script.splitlines()[0][:40])
+    return bad
+
+
+def test_every_step_with_a_pipe_runs_with_pipefail():
+    """Register T-41 (the PO, before review): a pipe in a step GitHub runs as
+    `bash -e {0}` hides the failure of every command but the last."""
+    _private_workflows()
+    bad = {name: got for name in sorted(PINNED)
+           if (got := _pipes_without_pipefail((WORKFLOWS / name).read_text()))}
+    assert not bad, bad
+    # the guard bites on the shape that shipped in the first heads of that pull request
+    assert _pipes_without_pipefail("jobs:\n  t:\n    steps:\n      - name: tick\n"
+                                   "        run: uv run x | tee log\n") == ["tick"]
+    assert not _pipes_without_pipefail("jobs:\n  t:\n    steps:\n      - name: ok\n        shell: bash\n"
+                                       "        run: uv run x | tee log\n")
+    assert not _pipes_without_pipefail("jobs:\n  t:\n    steps:\n      - name: ok\n        run: |\n"
+                                       "          set -o pipefail\n          a | b\n")
+    assert not _pipes_without_pipefail("jobs:\n  t:\n    steps:\n      - name: no pipe\n"
+                                       "        run: a || true\n")
+    assert _pipes_without_pipefail("jobs:\n  t:\n    steps:\n      - name: group\n"
+                                   "        run: a | { tee log || true; }\n") == ["group"]
 
 
 def test_every_workflow_file_is_exactly_as_pinned():

@@ -83,11 +83,21 @@ read: a partial clone (extensions.partialClone set to anything), any remote
 with a `promisor` key whatever its value (false included: no value is parsed),
 a shallow clone, a push inside the window whose commit
 `--ref` does not contain (main reset, or a stale local ref), or a missing
-object. 1 wins over 2 when both apply. Only a date, a UTC time and a
+object. 1 wins over 2 when both apply; the check then prints "[push-times]
+also CANNOT JUDGE: <N>" (N receipts, commits or a short history that could not
+be judged) before its result line, so a T4 inside a T3 run is named too
+(register T-41). Only a date, a UTC time and a
 (strategy, version) pair registered in the code (of the checkout running this
 script) are printed; anything else
 prints "<invalid>", and no message echoes git's own output. The script writes
-nothing, not even Python bytecode. A summary per market is printed first, then
+nothing, not even Python bytecode, but the `--items` file when it is asked
+for (the lines that set the verdict, newest first, for the email a red run
+sends: register T-41, C2). Its path is checked before the check runs (an
+existing path is refused, never overwritten); the file is created,
+exclusively, only after the check returned, so a crash leaves none; if it
+cannot be written then, the verdict stands, one line says so, and nothing is
+deleted (a write that fails midway can leave a partial list: the email may
+list fewer items, while the verdict and the run log stay complete). A summary per market is printed first, then
 every receipt that is not ON TIME. Counts and times only: no price.
 """
 from __future__ import annotations
@@ -376,40 +386,69 @@ def window_base(pushes: list[Push], since: datetime) -> str | None:
     return tip if tip and tip != ZERO else None
 
 
+@dataclass(frozen=True)
+class Window:
+    """What the walk found: the window's start, whether GitHub's push history
+    reaches back past it, main's tip at that start (None: the whole line),
+    each commit's push time, and per market (receipts added, commits that
+    could not be told)."""
+    since: datetime
+    reaches: bool
+    base: str | None
+    pushed: dict[str, datetime]
+    found: dict[str, tuple[list[Added], list[str]]]
+
+
+def collect(repo_dir: Path, repo: str, ref: str, now: datetime, days: int, markets: dict,
+            token: str | None, get=_get, until: datetime | None = None) -> Window:
+    """THE WALK, shared with scripts/check_deadline_margins.py (register T-41):
+    the receipts on commits GitHub received in the last `days` days, selected by
+    GitHub's push record, never by a stamp. Raises CannotRead."""
+    since = now - timedelta(days=days)
+    pushes, reaches = main_pushes(repo, token, since, get=get)
+    walk, later = ref, []
+    if until is not None:            # main as GitHub recorded it then; later pushes: the next run
+        later = [p for p in pushes if p.at > until]
+        pushes = [p for p in pushes if p.at <= until]
+        walk = next((p.after for p in pushes if p.after and p.after != ZERO), ref)
+    check_clone(repo_dir, ref, pushes, since)
+    if until is not None:            # FAIL CLOSED on both sides of the cut
+        all_on(repo_dir, walk, pushes, since)        # a reset before --until, restored after it
+        cut_off_by_until(repo_dir, walk, ref, later)
+    pushed = delivered_by(repo_dir, pushes, since)
+    base = window_base(pushes, since)
+    found = {slug: added_receipts(repo_dir, walk, slug, base) for slug in sorted(markets)}
+    return Window(since, reaches, base, pushed, found)
+
+
 def run(repo_dir: Path, repo: str, ref: str, now: datetime, days: int, markets: dict,
         token: str | None, get=_get, start: datetime | None = None,
-        pairs: set[tuple[str, str]] | None = None, until: datetime | None = None) -> int:
+        pairs: set[tuple[str, str]] | None = None, until: datetime | None = None,
+        items: list[tuple[str, str]] | None = None) -> int:
     """`start`: receipts GitHub received before it are information, not the
-    verdict. Nothing is selected or excused by a receipt's stamp."""
-    since = now - timedelta(days=days)
+    verdict. Nothing is selected or excused by a receipt's stamp. `items`, if
+    given, receives each line that sets the verdict as (its receipt's target
+    date or "", the line), for the email of a red run (register T-41, C2)."""
     pairs = _strategies() if pairs is None else pairs
+    items = [] if items is None else items
     try:
-        pushes, reaches = main_pushes(repo, token, since, get=get)
-        walk, later = ref, []
-        if until is not None:            # main as GitHub recorded it then; later pushes: the next run
-            later = [p for p in pushes if p.at > until]
-            pushes = [p for p in pushes if p.at <= until]
-            walk = next((p.after for p in pushes if p.after and p.after != ZERO), ref)
-        check_clone(repo_dir, ref, pushes, since)
-        if until is not None:            # FAIL CLOSED on both sides of the cut
-            all_on(repo_dir, walk, pushes, since)        # a reset before --until, restored after it
-            cut_off_by_until(repo_dir, walk, ref, later)
-        pushed = delivered_by(repo_dir, pushes, since)
-        base = window_base(pushes, since)
-        found = {slug: added_receipts(repo_dir, walk, slug, base) for slug in sorted(markets)}
+        w = collect(repo_dir, repo, ref, now, days, markets, token, get=get, until=until)
     except CannotRead as exc:
         print(f"[push-times] CANNOT JUDGE: {exc}")
+        items.append(("", f"CANNOT JUDGE: {exc}"))
         return 2
+    since, reaches, base, pushed, found = w.since, w.reaches, w.base, w.pushed, w.found
     print(f"[push-times] receipts whose commit reached main since {since:%Y-%m-%dT%H:%MZ} "
           f"(after {base[:7] if base else 'the start of the line'}); GitHub's push history "
           f"{'reaches back past it' if reaches else 'ends before it'}")
     if start is not None:
         print(f"[push-times] the verdict covers receipts GitHub received from {start:%Y-%m-%dT%H:%MZ} "
               "(and any with no push in the record); earlier ones are information")
-    worst, notes = (0 if reaches else 2), []
+    worst, notes, judged_not = (0 if reaches else 2), [], (0 if reaches else 1)
     if not reaches:
         notes.append("CANNOT JUDGE: GitHub's push history ends before the window's start, so "
                      "the window cannot be shown complete")
+        items.append(("", notes[-1]))
     for slug, (added, untold) in found.items():
         counts = {ON_TIME: 0, UNVERIFIABLE: 0, CANNOT_JUDGE: 0}
         before = {ON_TIME: 0, UNVERIFIABLE: 0, CANNOT_JUDGE: 0}
@@ -417,6 +456,7 @@ def run(repo_dir: Path, repo: str, ref: str, now: datetime, days: int, markets: 
             counts[CANNOT_JUDGE] += 1
             notes.append(f"{slug}: CANNOT JUDGE commit {c[:7]}: the file there does not begin "
                          "with the file at its first parent, or a line is not a JSON object")
+            items.append(("", notes[-1]))
         for a in added:
             verdict, at, gate = judge(a, markets[slug], pushed)
             earlier = start is not None and at is not None and at < start
@@ -429,18 +469,83 @@ def run(repo_dir: Path, repo: str, ref: str, now: datetime, days: int, markets: 
                              f"pushed {at.isoformat() if at else 'not in the record'}, deadline "
                              f"{gate.isoformat() if gate else 'unknown'} (commit {a.commit[:7]})"
                              + (" (before the start date: information)" if earlier else ""))
+                if not earlier:
+                    day = shown(r, "target")
+                    items.append(("" if day == "<invalid>" else day, notes[-1]))
         print(f"[push-times] {slug}: " + ", ".join(f"{k} {v}" for k, v in counts.items())
               + ("; before the start date: " + ", ".join(f"{k} {v}" for k, v in before.items())
                  if start is not None else "")
               + (" (no receipt in the window)" if not any(counts.values()) and not any(before.values())
                  else ""))
+        judged_not += counts[CANNOT_JUDGE]
         if counts[UNVERIFIABLE]:
             worst = 1
         elif counts[CANNOT_JUDGE] and worst != 1:
             worst = 2
     for n in notes:
         print(f"[push-times] {n}")
+    if worst == 1 and judged_not:
+        # Exit 1 wins over 2, so the result line says UNVERIFIABLE only; this line
+        # says that the same run also could not judge (T3 AND T4: register T-41).
+        print(f"[push-times] also CANNOT JUDGE: {judged_not}")
     return worst
+
+
+def open_items(path: Path):
+    """The `--items` file, created EXCLUSIVELY: if anything exists at that
+    path, this fails and nothing is written, so a mistaken path can never
+    truncate a receipts or ledger file. Created only after the check returned,
+    so a check that crashed leaves no file (its email then says "no list")."""
+    return path.open("x", encoding="utf-8")
+
+
+def write_items(out, items: list[tuple[str, str]]) -> None:
+    """The items that set a red run's verdict, for its email (register T-41,
+    C2), into the file `open_items` created: one per line, "<date or -> <line>",
+    newest date first, the same date in descending order of the line's text,
+    items without a date last. The only file a check writes, outside the
+    checkout."""
+    out.write(render_items(items))
+
+
+def render_items(items: list[tuple[str, str]]) -> str:
+    """The whole list as one text, built in memory before any file exists."""
+    def day(d: str) -> str:
+        return d if d and d != "<invalid>" else ""     # a date not in its shape sorts as none: last
+    ordered = sorted(items, key=lambda i: (day(i[0]) != "", day(i[0]), i[1]), reverse=True)
+    return "".join(f"{day(d) or '-'} {line}\n" for d, line in ordered)
+
+
+def items_file(ap, value: str | None) -> Path | None:
+    """The `--items` path, checked BEFORE the check runs: nothing may exist
+    there (a file, a folder, a link) and its parent must be a folder, else
+    argparse's own refusal (exit 2). The file itself is created, exclusively,
+    only after the check returned (`write_items_to`)."""
+    if not value:
+        return None
+    path = Path(value)
+    if path.exists() or path.is_symlink() or not path.parent.is_dir():
+        ap.error("--items: something exists at that path, or its folder does not; the check never "
+                 "overwrites or truncates a file")
+    return path
+
+
+def write_items_to(path: Path | None, items: list[tuple[str, str]], tag: str = "[push-times]") -> None:
+    """After the check returned: the whole list is built in memory, then
+    `path` is created exclusively and written in one call. A failure here never
+    changes the check's verdict: it prints one fixed line and touches nothing
+    further. It never deletes anything: a path something claimed is left as it
+    is. STATED LIMIT: a write that fails midway can leave a partial list of
+    ours, so the email may list fewer items; the verdict, its label and the run
+    log stay complete."""
+    if path is None:
+        return
+    try:
+        text = render_items(items)
+        with open_items(path) as out:
+            out.write(text)
+    except Exception as exc:  # noqa: BLE001 — the verdict stands whatever this does
+        print(f"{tag} could not write the items list: {type(exc).__name__}")
 
 
 def _registry():
@@ -468,6 +573,8 @@ def main(argv: list[str] | None = None, now: datetime | None = None) -> int:
                     help="start date (YYYY-MM-DD, UTC): only receipts GitHub received from it set the exit code")
     ap.add_argument("--until", default=None,
                     help="the time the clone was fetched (ISO, with a zone): later pushes are left for the next run")
+    ap.add_argument("--items", default=None,
+                    help="write the items that set the verdict to this file, newest first (for the email)")
     args = ap.parse_args(argv)
     if not args.repo:
         ap.error("--repo OWNER/NAME is needed (or GITHUB_REPOSITORY)")
@@ -480,8 +587,12 @@ def main(argv: list[str] | None = None, now: datetime | None = None) -> int:
         until = _at(args.until) if args.until else None
     except ValueError:
         ap.error("--until must be an ISO time with a zone, e.g. 2026-11-17T18:23:05Z")
-    return run(ROOT, args.repo, args.ref, now or datetime.now(timezone.utc), args.days,
-               _registry(), os.environ.get("GITHUB_TOKEN"), start=start, until=until)
+    out = items_file(ap, args.items)              # checked now; created only after the check returned
+    items: list[tuple[str, str]] = []
+    rc = run(ROOT, args.repo, args.ref, now or datetime.now(timezone.utc), args.days,
+             _registry(), os.environ.get("GITHUB_TOKEN"), start=start, until=until, items=items)
+    write_items_to(out, items)
+    return rc
 
 
 RESULTS = {0: "ON TIME", 1: "UNVERIFIABLE", 2: "CANNOT JUDGE"}
