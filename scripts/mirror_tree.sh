@@ -3,10 +3,18 @@
 # no push. This is the one place that says what the mirror carries.
 #
 #   scripts/mirror_tree.sh <folder>
+#   scripts/mirror_tree.sh --judge-only <folder>
+#
+# With --judge-only it judges the folder exactly as below and stops there:
+# exit 0 if it may be built into, exit 2 with the reason if not, nothing
+# started, created or written either way. The publisher asks it about the
+# mirror folder itself before making that folder equal to the judged tree
+# (rsync --delete), so the folders protected here are protected there too.
 #
 # Two callers, one list:
-#   - scripts/publish_mirror.sh builds into the mirror checkout, then commits
-#     and pushes it (the server, after each tick);
+#   - scripts/publish_mirror.sh builds into a new temporary folder, has it
+#     judged, makes the mirror checkout equal to it, then commits and pushes
+#     (the server, after each tick);
 #   - CI builds into a temporary folder and runs the public README's command
 #     there (`uv sync && uv run pytest`), so that what the README promises is
 #     tested before it is published.
@@ -34,7 +42,9 @@
 # docs/talea-migration-plan.md).
 set -uo pipefail
 unset CDPATH
-[ $# -eq 1 ] || { echo "usage: scripts/mirror_tree.sh <folder>" >&2; exit 2; }
+JUDGE_ONLY=""
+if [ $# -eq 2 ] && [ "$1" = "--judge-only" ]; then JUDGE_ONLY=1; shift; fi
+[ $# -eq 1 ] || { echo "usage: scripts/mirror_tree.sh [--judge-only] <folder>" >&2; exit 2; }
 
 # ---- WHERE it may build. Everything down to "the list" only reads and refuses.
 # The copies below DELETE whatever is in the folder and not on the list. Built
@@ -98,6 +108,9 @@ if [ -d "$MIRROR" ]; then
   found="${found%%$'\n'*}"
   [ -z "$found" ] || refuse "it holds a file with more than one hard link: ${found#./}"
 fi
+
+# Asked only whether the folder may be built into: it may.
+[ -z "$JUDGE_ONLY" ] || { echo "[mirror] '$TARGET' may be built into" >&2; exit 0; }
 
 # ---- the list ----
 cd "$REPO" || exit 2

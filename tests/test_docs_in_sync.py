@@ -359,10 +359,13 @@ def test_mirror_is_deny_by_default_allowlist():
     txt = (ROOT / "scripts" / "mirror_tree.sh").read_text()
     publish = "\n".join(l for l in (ROOT / "scripts" / "publish_mirror.sh").read_text().splitlines()
                         if not l.lstrip().startswith("#"))
-    assert 'bash scripts/mirror_tree.sh "$MIRROR"' in publish, \
+    assert 'bash scripts/mirror_tree.sh "$TREE"' in publish, \
         "publish_mirror.sh must build the mirror's file set with scripts/mirror_tree.sh"
-    assert not re.search(r"\b(rsync|cp)\b|--include", publish), \
-        "publish_mirror.sh must not copy anything itself: the list exists once, in mirror_tree.sh"
+    # It copies nothing itself but the judged tree, whole, into the mirror's
+    # working tree (its own .git excluded): the list exists once, in mirror_tree.sh.
+    copies = re.findall(r"^\s*(?:rsync|cp)\b.*$|\b(?:\||&&|;|\$\()\s*(?:rsync|cp)\b.*$", publish, re.M)
+    assert copies == ['rsync -a --checksum --delete --exclude=/.git "$TREE/" ./'] and "--include" not in publish, \
+        "publish_mirror.sh must not copy anything itself but the judged tree: the list exists once, in mirror_tree.sh"
     assert 'if [ -z "$SLUGS" ]' in publish, \
         "publish_mirror.sh must skip (publish nothing) when no public market is resolved"
     assert "--exclude='*'" in txt, \

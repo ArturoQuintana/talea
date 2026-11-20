@@ -8,12 +8,16 @@ skipped there by name, while in the private repository nothing skips at all.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shutil
+import signal
 import stat
 import subprocess
 import sys
+import time
+import urllib.parse
 from pathlib import Path
 
 import pytest
@@ -134,10 +138,10 @@ DIVIDER = "# ---- the list ----"
 # What this is NOT: a judgement of the change. It only makes a change
 # impossible to miss; judging it is the readers' and the operator's work.
 PINNED_SCRIPTS = {
-    "scripts/mirror_tree.sh": "887dd09a705ce81ccf609cdbf7315c97f150afc8753a660eaf173a3f2ca2aef3",
+    "scripts/mirror_tree.sh": "5fef3ceea85e2419fdeae0eec1c5ea149abf9f8a6ebdff0dae50d774c9d691de",
     # (a comment line between the two, so that two pull requests changing one
     # line each can be merged by git)
-    "scripts/publish_mirror.sh": "2a7d27b059ff1b3205dc39fca887919268fa56872b371378c21a868fbe6ec108",
+    "scripts/publish_mirror.sh": "8bfd10e51c44bf175995cf73409498275c39477c81cfb02d3ac41cb4d6c892f8",
 }
 
 # THE READABLE STATEMENT of what is below the divider, comments and blank lines
@@ -339,6 +343,152 @@ def _snapshot(folder: Path) -> dict:
     return seen
 
 
+# WHAT GITHUB RECEIVED IS COUNTED WHERE IT ARRIVES (Codex, rounds 4 to 7).
+# The target: nothing but the one checked commit reaches GitHub, measured at
+# the receiver. Out of scope (PO's ruling, round 7): a second push of the same
+# commit to main (nothing changes at GitHub) and a push to "." (it never
+# leaves the machine).
+# Every bare origin the tests make (GitHub's stand-in) has a
+# `reference-transaction` hook that appends each ref update it commits
+# ("<origin> <old> <new> <ref>") to a log beside it: outside the mirror
+# folder, the checkout and the publisher's environment, and whatever way git
+# was started (an `env -i` push is recorded too). It sees every ref update,
+# by push or not. Ref packing would show there too, so each origin's gc and
+# maintenance are off. The hook is proven to log when it is installed (one
+# throwaway ref, made and deleted, must show in the log, which is then
+# emptied), and after every publish each origin's log and executable hook must
+# still be there. After EVERY publish in these tests, both modes and every
+# scenario, the fixture holds the publish to this:
+#   - "[mirror] published [": exactly one update: refs/heads/main, from the
+#     commit it was at to a new commit whose only parent is that one; no other
+#     ref (no tag, no other branch), and main is now that commit;
+#   - "[mirror] NOT KNOWN whether published": at most that one update;
+#   - any other ending (refused, NOT published, up to date, quiet): no update.
+# A second check, from the client side: the publisher runs with
+# GIT_TRACE2_EVENT, so each git process that keeps the variable records its
+# argv and the command it resolved to. Every push recorded there must be
+# exactly `git -c push.followTags=false push -q --no-follow-tags <remote> <commit>:refs/heads/main`,
+# where <remote> is the remote the mirror's branch tracks (branch.<b>.remote,
+# read in the folder git says the push ran in) and its URL is the origin that
+# received the update; there is exactly one when published (of the commit main
+# received) and none when nothing was pushed. Whenever the publish reached the
+# build (a program of the build or the gate was started: the market lookup,
+# the renderer or the check), every ending from there on (a gate refusal, the
+# check's signal ending, the destination, sync, staging, comparison, fetch,
+# commit and push endings, published, up to date, not known) must leave a
+# record that exists and holds that git ran: the repository check before the
+# build asks git three questions. A missing record is then a failure, never "no push". Endings
+# before the build are not held to this: some run no git that keeps the
+# variable (the one git the publisher runs under `env -i`, listing git's
+# repository variables, is never in the record; a stand-in git may answer).
+
+ZERO = "0" * 40
+
+
+def _record_what_it_receives(origin: Path) -> None:
+    for key, value in (("gc.auto", "0"), ("maintenance.auto", "false"), ("receive.autogc", "false")):
+        _git(origin, "config", key, value)
+    hook = origin / "hooks" / "reference-transaction"
+    hook.write_text(f'''#!/bin/sh
+[ "$1" = committed ] || exit 0
+while read -r old new ref; do printf '%s %s %s %s\\n' "$(pwd -P)" "$old" "$new" "$ref"; done >> "{origin}.received"
+''')
+    hook.chmod(0o755)
+    log = Path(f"{origin}.received")
+    _git(origin, "update-ref", "refs/liveness/probe", "refs/heads/main")
+    _git(origin, "update-ref", "-d", "refs/liveness/probe")
+    assert log.exists() and [l.split()[-1] for l in log.read_text().splitlines()] == ["refs/liveness/probe"] * 2, \
+        "the origin's hook did not log a throwaway ref made and deleted"
+    log.write_text("")
+
+
+def _received(top: Path) -> dict[Path, str]:
+    """Every origin's log of what it received, as it stands."""
+    return {log: log.read_text() for log in sorted(top.rglob("*.received"))}
+
+
+def _received_since(top: Path, before: dict[Path, str]) -> list[tuple[Path, str, str, str]]:
+    """The ref updates the origins committed since `before`: (origin, old, new, ref)."""
+    out, now = [], _received(top)
+    for log in before:
+        hook = log.with_name(log.name[:-len(".received")]) / "hooks" / "reference-transaction"
+        assert log in now and hook.is_file() and os.access(hook, os.X_OK), \
+            f"an origin's record of what it received is gone: {log}"
+    for log, text in now.items():
+        assert text.startswith(before.get(log, "")), f"{log} was rewritten"
+        for line in text[len(before.get(log, "")):].splitlines():
+            repo, old, new, ref = line.rsplit(" ", 3)
+            out.append((Path(repo), old, new, ref))
+    return out
+
+
+def _git_ran(trace: Path) -> list[tuple[str, str, list[str], str | None]] | None:
+    """Every git process recorded in `trace`, in the order each started:
+    (its id, the command git resolved it to, its argv, its working tree);
+    None if there is no record at all. A child's id starts with its parent's
+    id and a slash."""
+    if not trace.exists():
+        return None
+    argv, name, worktree, order = {}, {}, {}, []
+    for line in trace.read_text().splitlines():
+        event = json.loads(line)
+        if event["event"] == "start":
+            argv[event["sid"]] = event["argv"]
+            order.append(event["sid"])
+        elif event["event"] == "cmd_name":
+            name[event["sid"]] = event["name"]
+        elif event["event"] == "def_repo":
+            worktree[event["sid"]] = event.get("worktree")
+    return [(sid, name.get(sid, "?"), argv[sid], worktree.get(sid)) for sid in order]
+
+
+ONE_PUSH = re.compile(r"([0-9a-f]{40}):refs/heads/main")
+REACHED_GIT = ("[mirror] published [", "[mirror] up to date [", "[mirror] NOT KNOWN whether published", "nothing was pushed")
+
+
+def _hold_the_pushes(stdout: str, received: list[tuple[Path, str, str, str]],
+                     ran: list[tuple[str, str, list[str], str | None]] | None, reached_the_build: bool) -> list[list[str]]:
+    """The publish held to the rules above: first what the origins received,
+    then the client's record. Returns the pushes in that record (argv)."""
+    for repo, old, new, ref in received:
+        assert ref == "refs/heads/main" and old != ZERO and new != ZERO, \
+            f"GitHub received an update other than main moving on: {old} {new} {ref}"
+        assert _git(repo, "rev-parse", f"{new}^@").split() == [old], \
+            f"main moved to a commit whose parents are not exactly the one it was at: {old} -> {new}"
+    if "[mirror] published [" in stdout:
+        assert len(received) == 1, f"published, and GitHub received {len(received)} updates: {received}"
+        (repo, _, new, _), = received
+        assert _git(repo, "rev-parse", "refs/heads/main").strip() == new
+    elif "[mirror] NOT KNOWN whether published" in stdout:
+        assert len(received) <= 1, f"GitHub received {len(received)} updates: {received}"
+    else:
+        assert received == [], f"not published, but GitHub received: {received}"
+    if reached_the_build or any(ending in stdout for ending in REACHED_GIT):
+        assert ran, "the publish reached the build, but git's record is missing or empty"
+    pushes = [(wt, a) for _, n, a, wt in ran or [] if n == "push"]
+    for wt, a in pushes:
+        assert a[1:6] == ["-c", "push.followTags=false", "push", "-q", "--no-follow-tags"] \
+            and len(a) == 8 and a[6] and ONE_PUSH.fullmatch(a[7]), f"a push of another form: {a}"
+        assert wt, f"git's record does not say which folder the push ran in: {a}"
+        folder = Path(wt)
+        branch = _git(folder, "symbolic-ref", "-q", "--short", "HEAD").strip()
+        tracked = _git(folder, "config", "--get", f"branch.{branch}.remote").strip()
+        assert a[6] == tracked, f"a push to '{a[6]}', not to the remote the branch tracks ('{tracked}')"
+        if received:
+            url = _git(folder, "config", "--get", f"remote.{tracked}.url").strip()
+            where = urllib.parse.urlsplit(url).path if "://" in url else url    # ssh://host/path: the path
+            assert (folder / where).resolve() == received[0][0].resolve(), \
+                f"the remote's URL {url} is not the origin that received the update"
+    if "[mirror] published [" in stdout:
+        assert [ONE_PUSH.fullmatch(a[7])[1] for _, a in pushes] == [received[0][2]], \
+            f"git's record does not show one push of the commit main received: {[a for _, a in pushes]}"
+    elif "[mirror] NOT KNOWN whether published" in stdout:
+        assert len(pushes) <= 1, f"{len(pushes)} pushes: {[a for _, a in pushes]}"
+    else:
+        assert pushes == [], f"not published, but git pushed: {[a for _, a in pushes]}"
+    return [a for _, a in pushes]
+
+
 @pytest.fixture
 def staged(tmp_path):
     home = tmp_path / "home"
@@ -368,27 +518,77 @@ def staged(tmp_path):
     # Stand-ins. `uv` is always one: it answers the market lookup with "es" (or
     # with nothing, when the test says the lookup fails) and, where the test
     # asks for real writing, plays the page renderer by writing index.html into
-    # the folder it is given. rsync, cp and mkdir are stand-ins that only record
-    # that they were started, unless the test asks for the real ones.
-    lookup_bin, stand_ins = tmp_path / "bin-uv", tmp_path / "bin-writers"
+    # the folder it is given. It also plays the publisher's private-content
+    # check (exit GATE_EXIT, default 0, printing GATE_SAYS), recording the
+    # render time each of them was given, and the alert command: EVERY email
+    # is kept, in order, as alerts/<n>.args (with the folder it was sent
+    # from: the checkout, whose .env the real one reads) and alerts/<n>.body (exit
+    # ALERT_EXIT; or exit 1 for the one numbered ALERT_FAILS_AT, e.g. 001 for
+    # the second), and an email is not a program "started". rsync, cp and mkdir
+    # are stand-ins that only record that they were started, unless the test
+    # asks for the real ones.
+    lookup_bin, stand_ins, alerts = tmp_path / "bin-uv", tmp_path / "bin-writers", tmp_path / "alerts"
+    trace = tmp_path / "git-trace.jsonl"     # every git process a publish starts (above)
     lookup_bin.mkdir()
     stand_ins.mkdir()
+    alerts.mkdir()
     (lookup_bin / "uv").write_text(f'''#!/bin/sh
+case "$*" in *"-m talea alert"*)
+  n=$(ls "{alerts}" | wc -l | tr -d ' '); n=$(printf '%03d' $((n / 2)))
+  printf '%s\\n' "$*" "sent from $(pwd -P)" > "{alerts}/$n.args"; cat > "{alerts}/$n.body"
+  [ "${{ALERT_FAILS_AT:-}}" != "$n" ] || exit 1
+  exit "${{ALERT_EXIT:-0}}";;
+esac
 echo "uv $*" >> "{started}"
 case "$*" in
   *"markets --public"*) [ -n "${{LOOKUP_FAILS:-}}" ] || echo es;;
   *"render_dashboard.py --site"*)
+    echo "render at ${{TALEA_RENDER_EPOCH:-unset}}" >> "{started}"
     if [ -n "${{REAL_WRITES:-}}" ]; then for last; do :; done; printf 'the rendered page\\n' > "$last/index.html"; fi
     if [ -n "${{DURING_THE_BUILD:-}}" ]; then sh -c "$DURING_THE_BUILD"; fi;;
+  *"private_content_check.py"*)
+    echo "check at ${{TALEA_RENDER_EPOCH:-unset}} in $(pwd -P)" >> "{started}"
+    [ -z "${{GATE_SAYS:-}}" ] || printf '%s\\n' "$GATE_SAYS"
+    if [ -n "${{GATE_SLEEP:-}}" ]; then : > "{tmp_path}/check-started"; sleep "$GATE_SLEEP"; fi
+    exit "${{GATE_EXIT:-0}}";;
 esac
 ''')
     (lookup_bin / "uv").chmod(0o755)
+    # `timeout` too: it records how it was asked, then runs the command, unless
+    # the test says the time ran out (exit 124, as GNU timeout).
+    (lookup_bin / "timeout").write_text(f'''#!/bin/sh
+echo "timeout $1 $2 $3" >> "{started}"
+[ -z "${{TIMEOUT_FIRES:-}}" ] || exit 124
+shift 3; exec "$@"
+''')
+    (lookup_bin / "timeout").chmod(0o755)
+    # and `rsync`: the real one, except that the publisher's own sync of the
+    # judged tree into the mirror (the one call with --exclude=/.git) can be
+    # told to fail with RSYNC_SYNC_EXIT (127: as if rsync were missing), to
+    # run without its --checksum (RSYNC_SYNC_QUICK), or to be preceded or
+    # followed by a command (RSYNC_SYNC_FIRST, e.g. the mirror folder swapped
+    # after its judgement; RSYNC_SYNC_THEN, e.g. a file changed after the sync).
+    real_rsync = shutil.which("rsync") or "/usr/bin/rsync"
+    (lookup_bin / "rsync").write_text(f'''#!/bin/sh
+case "$*" in *"--exclude=/.git"*)
+  [ -z "${{RSYNC_SYNC_EXIT:-}}" ] || exit "$RSYNC_SYNC_EXIT"
+  [ -z "${{RSYNC_SYNC_FIRST:-}}" ] || sh -c "$RSYNC_SYNC_FIRST"
+  if [ -n "${{RSYNC_SYNC_QUICK:-}}" ]; then
+    for a; do shift; [ "$a" = --checksum ] || set -- "$@" "$a"; done
+  fi
+  "{real_rsync}" "$@" || exit $?
+  [ -z "${{RSYNC_SYNC_THEN:-}}" ] || sh -c "$RSYNC_SYNC_THEN"
+  exit 0;;
+esac
+exec "{real_rsync}" "$@"
+''')
+    (lookup_bin / "rsync").chmod(0o755)
     for name in ("rsync", "cp", "mkdir"):
         (stand_ins / name).write_text(f'#!/bin/sh\necho "{name} $*" >> "{started}"\n')
         (stand_ins / name).chmod(0o755)
 
     def run(folder, cwd=repo, script=repo / "scripts" / "mirror_tree.sh", home_set=True,
-            real_writes=False, lookup_fails=False):
+            real_writes=False, lookup_fails=False, judge_only=False):
         if started.exists():
             started.unlink()
         before = _snapshot(home)
@@ -401,36 +601,54 @@ esac
             env["REAL_WRITES"] = "1"
         if lookup_fails:
             env["LOOKUP_FAILS"] = "1"
-        r = subprocess.run([shutil.which("bash"), str(script), str(folder)], cwd=cwd, text=True,
+        r = subprocess.run([shutil.which("bash"), str(script), *(["--judge-only"] if judge_only else []), str(folder)],
+                           cwd=cwd, text=True,
                            capture_output=True, timeout=60,   # a guard that never answers is red
                            env=env)
         r.started = started.read_text().splitlines() if started.exists() else []
         r.untouched = _snapshot(home) == before
         return r
 
+    def publish_env(mirror, during_the_build="", also_set=None, without=()):
+        env = {"PATH": f"{lookup_bin}:{Path(shutil.which('git')).parent}:/usr/bin:/bin",
+               "HOME": str(home), "MIRROR_DIR": str(mirror), "REAL_WRITES": "1",
+               "MIRROR_BASE": "b" * 40,
+               "DURING_THE_BUILD": during_the_build, **(also_set or {}),
+               "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+               "GIT_TRACE2_EVENT": str(trace)}
+        return {k: v for k, v in env.items() if k not in without}
+
     def publish(mirror, during_the_build: str = "", also_set: dict[str, str] | None = None,
-                started_as: str | None = None, started_in: Path = home):
+                started_as: str | None = None, started_in: Path = home, without: tuple[str, ...] = ()):
         """The real publisher from the made-up checkout, with the real git, rsync,
         cp and mkdir, into `mirror`. Everything it can reach is under tmp_path.
         `during_the_build` is a command the stand-in renderer runs, for the tests
         in which something changes while the tree is built. `started_as` and
         `started_in` are the name it is started by and the folder it is started
-        from, when a test needs those to be relative."""
+        from, when a test needs those to be relative. `without` names variables
+        left out of its environment altogether."""
         assert not os.path.isabs(str(mirror)) or str(mirror).startswith(str(tmp_path)), "real writes only under tmp_path"
         if started.exists():
             started.unlink()
+        for old in alerts.iterdir():
+            old.unlink()
+        trace.unlink(missing_ok=True)
+        received = _received(tmp_path)
         before = _snapshot(home)
         r = subprocess.run([shutil.which("bash"), started_as or str(repo / "scripts" / "publish_mirror.sh")],
                            cwd=started_in, text=True, capture_output=True, timeout=120,
-                           env={"PATH": f"{lookup_bin}:{Path(shutil.which('git')).parent}:/usr/bin:/bin",
-                                "HOME": str(home), "MIRROR_DIR": str(mirror), "REAL_WRITES": "1",
-                                "DURING_THE_BUILD": during_the_build, **(also_set or {}),
-                                "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull})
+                           env=publish_env(mirror, during_the_build, also_set, without))
         r.started = started.read_text().splitlines() if started.exists() else []
         r.untouched = _snapshot(home) == before
+        r.git = _git_ran(trace)
+        r.received = _received_since(tmp_path, received)
+        r.pushes = _hold_the_pushes(r.stdout, r.received, r.git, reached_the_build=bool(r.started))
         return r
 
-    run.home, run.repo, run.top, run.publish = home, repo, tmp_path, publish
+    run.home, run.repo, run.top, run.publish, run.publish_env = home, repo, tmp_path, publish, publish_env
+    run.trace = trace
+    run.received_now = lambda: _received(tmp_path)
+    run.received_since = lambda before: _received_since(tmp_path, before)
     run.path_for_real_writes = f"{lookup_bin}:{Path(shutil.which('git') or '/usr/bin/git').parent}:/usr/bin:/bin"
     return run
 
@@ -477,6 +695,27 @@ def test_the_script_refuses_a_folder_it_would_damage(staged, folder, given_from,
     assert r.stdout == ""
     assert r.started == [], f"a program that writes was started: {r.started}"
     assert r.untouched, "something under the made-up home changed"
+
+
+@pytest.mark.parametrize("folder, given_from, why", REFUSED, ids=[repr(c[0]) + " from " + c[1] for c in REFUSED])
+def test_asked_only_to_judge_it_refuses_the_same_folders_the_same_way(staged, folder, given_from, why):
+    """--judge-only is the same judgement (the publisher asks it about the real
+    mirror folder before the sync), and it stops there: the same refusal, and
+    nothing started or written."""
+    places = {"repo": staged.repo, "home": staged.home, "top": staged.top}
+    r = staged(folder.format(**places), cwd={**places, "repo-data": staged.repo / "Data"}[given_from], judge_only=True)
+    assert r.returncode == 2 and "refusing to build into" in r.stderr and why in r.stderr, (r.returncode, r.stderr)
+    assert r.stdout == "" and r.started == [] and r.untouched
+
+
+@pytest.mark.parametrize("folder", ["{home}/ledger-mirror", "{home}/elsewhere", "{home}/elsewhere/new"])
+def test_asked_only_to_judge_a_folder_it_may_build_into_it_says_so_and_does_nothing(staged, folder):
+    target = folder.format(home=staged.home)
+    r = staged(target, judge_only=True)
+    assert r.returncode == 0 and f"[mirror] '{target}' may be built into" in r.stderr, (r.returncode, r.stderr)
+    assert r.stdout == "" and r.started == [] and r.untouched
+    real = staged(target, judge_only=True, real_writes=True)
+    assert real.returncode == 0 and real.untouched and not (staged.home / "elsewhere" / "new").exists()
 
 
 def test_the_same_folder_spelled_in_another_case_is_refused_where_that_is_the_same_folder(staged):
@@ -725,6 +964,7 @@ def _repository(folder: Path, origin: Path | None = None) -> None:
         _git(folder.parent, "init", "-q", "--bare", "-b", "main", str(origin))
         _git(folder, "remote", "add", "origin", str(origin))
         _git(folder, "push", "-q", "-u", "origin", "main")
+        _record_what_it_receives(origin)
 
 
 def _a_mirror(staged) -> tuple[Path, Path]:
@@ -767,21 +1007,880 @@ def test_the_publisher_commits_and_pushes_the_mirrors_own_repository(staged):
     assert _snapshot(staged.repo) == before
 
 
+# ---- the private-content gate (register D-37) ----
+# The check itself is tested in team/tests; here, what the publisher does with
+# its answer. The stand-in `uv` plays it (GATE_EXIT, GATE_SAYS, GATE_SLEEP) and
+# the alert command (its arguments and body are kept); the stand-in `timeout`
+# can run out (TIMEOUT_FIRES). The publisher ships in OBSERVE mode; ENFORCE is
+# tested on a copy with that one line changed, as the pull request that turns
+# it on will change it.
+
+CHECK_SAYS = "Data/it/prices.json: bar 3 (line 7)\nprivate-content check: 3 finding(s)"
+
+
+def _enforcing(staged) -> None:
+    script = staged.repo / "scripts" / "publish_mirror.sh"
+    text = script.read_text()
+    assert text.count("\nGATE_MODE=observe\n") == 1
+    script.write_text(text.replace("\nGATE_MODE=observe\n", "\nGATE_MODE=enforce\n"))
+
+
+def _check_line(r) -> str:
+    lines = [l for l in r.started if "private_content_check.py" in l and l.startswith("uv ")]
+    assert len(lines) == 1, r.started
+    return lines[0]
+
+
+def _alerts(staged) -> list[tuple[str, str]]:
+    """Every email the publisher sent, in order: (its arguments, its body).
+    Each was sent from the checkout (the real alert reads its .env), wherever
+    the publisher was by then."""
+    folder = staged.top / "alerts"
+    sent = [(a.read_text(), a.with_suffix(".body").read_text()) for a in sorted(folder.glob("*.args"))]
+    for args, _ in sent:
+        assert args.endswith(f"\nsent from {staged.repo.resolve()}\n"), args
+    return sent
+
+
+def _alert(staged) -> tuple[str, str]:
+    """The one email the publisher sent, or ("", "") if it sent none. More than
+    one is a failure here: the tests that expect two read `_alerts`."""
+    sent = _alerts(staged)
+    assert len(sent) <= 1, sent
+    return sent[0] if sent else ("", "")
+
+
+def _fixed_words(body: str) -> None:
+    """The email names no path, no line of the check's own, no base, no folder."""
+    for leak in ("Data/it", "bar 3", "line 7", "b" * 40, "/", "\\"):
+        assert leak not in body, (leak, body)
+
+
+def _not_published(staged, r, reason: str, subject: str | None = None) -> str:
+    """The one ending that is not a publish: exit 1, the reason in the journal,
+    and one email in fixed words that says so. Returns the email's body."""
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert f"[mirror] NOT published: {reason}" in r.stdout and "published [" not in r.stdout, r.stdout + r.stderr
+    args, body = _alerts(staged)[-1]
+    assert f"--subject talea mirror NOT published: {subject or reason} --body-file /dev/stdin" in args, args
+    assert body.startswith("The public mirror was NOT published") and f"Reason: {reason}." in body, body
+    assert "journalctl -u esios-tick" in body
+    _fixed_words(body)
+    return body
+
+
+@needs_git_and_rsync
+def test_the_gate_judges_a_fresh_build_against_the_ticks_base_and_then_publishes(staged):
+    mirror, origin = _a_mirror(staged)
+    r = staged.publish(mirror)
+    assert r.returncode == 0 and "[mirror] published [es]" in r.stdout, r.stdout + r.stderr
+    line = _check_line(r)
+    tree = re.fullmatch(r"uv run --no-project python -I -S team/private_content_check\.py "
+                        r"--repo \. --tree (\S+) --base (b{40})", line)
+    assert tree and not tree.group(1).startswith(str(staged.home)), line     # a new folder, not the mirror
+    assert "timeout -k 30 600" in r.started
+    assert "[mirror] private-content check passed in " in r.stdout and "(mode observe" in r.stdout
+    render, check = (next(l for l in r.started if l.startswith(w)) for w in ("render at ", "check at "))
+    epoch = render.removeprefix("render at ")
+    assert epoch.isdigit() and check == f"check at {epoch} in {staged.repo.resolve()}"
+    assert r.started.index(render) < r.started.index(check)
+    assert _alerts(staged) == [], "a publish that passed sent an email"
+
+
+@needs_git_and_rsync
+def test_an_inherited_render_time_is_never_used(staged):
+    mirror, _ = _a_mirror(staged)
+    r = staged.publish(mirror, also_set={"TALEA_RENDER_EPOCH": "1"})
+    render = next(l for l in r.started if l.startswith("render at "))
+    assert render != "render at 1" and int(render.split()[-1]) > 1_700_000_000
+
+
+FAILS = [  # (what the stand-ins are told, what the reason must say)
+    ({"GATE_EXIT": "1"}, "the check found 3 finding(s) (exit 1, after "),
+    ({"GATE_EXIT": "2"}, "the check could not run (exit 2, after "),
+    ({"GATE_EXIT": "3"}, "the check exited 3 after "),
+    ({"GATE_EXIT": "127"}, "the check could not be started: uv or timeout is missing (exit 127, after "),
+    ({"TIMEOUT_FIRES": "1"}, "the check did not finish within 600 s (exit 124, after "),
+    ({"MIRROR_BASE": ""}, "no MIRROR_BASE, the trust anchor"),
+]
+
+
+@needs_git_and_rsync
+@pytest.mark.parametrize("told, reason", FAILS)
+def test_enforcing_any_fail_publishes_nothing_leaves_the_mirror_folder_alone_and_emails_fixed_words(
+        staged, told, reason):
+    _enforcing(staged)
+    mirror, origin = _a_mirror(staged)
+    before, folder = _own_state(mirror), _snapshot(mirror)
+    r = staged.publish(mirror, also_set={"GATE_SAYS": CHECK_SAYS, **told})
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "published [" not in r.stdout and f"REFUSED by the private-content gate: {reason}" in r.stdout
+    assert _own_state(mirror) == before and _snapshot(mirror) == folder
+    assert _git(origin, "rev-list", "--count", "main").strip() == "1"
+    args, body = _alert(staged)
+    assert "--subject talea mirror NOT published: the private-content gate refused --body-file /dev/stdin" in args
+    assert body.startswith("The public mirror was NOT published")
+    assert f"Reason: the private-content gate refused: {reason}" in body
+    assert "journalctl -u esios-tick" in body and "would have refused" not in body
+    _fixed_words(body)
+    if "MIRROR_BASE" in told:
+        assert not [l for l in r.started if "private_content_check.py" in l]
+    if "GATE_EXIT" in told:
+        assert "bar 3 (line 7)" in r.stdout                     # the check's own lines: the journal only
+
+
+@needs_git_and_rsync
+@pytest.mark.parametrize("told, reason", FAILS)
+def test_observing_any_fail_says_it_continues_and_then_that_it_published(staged, told, reason):
+    """Two emails, each true when it is sent: at the check, that the gate
+    would have refused and the publish goes on; after the push, that it was
+    published. Never "published" before the push has succeeded."""
+    mirror, origin = _a_mirror(staged)
+    r = staged.publish(mirror, also_set={"GATE_SAYS": CHECK_SAYS, **told})
+    assert r.returncode == 0 and "[mirror] published [es]" in r.stdout, r.stdout + r.stderr
+    assert f"WOULD refuse (observe mode; continuing): {reason}" in r.stdout
+    assert _git(origin, "rev-list", "--count", "main").strip() == "2"
+    (first_args, first), (last_args, last) = _alerts(staged)
+    assert "--subject talea mirror: the private-content gate would have refused (observe mode; continuing) " in first_args
+    assert first.startswith("The private-content gate would have refused this publish. It is in observe mode, "
+                            "so the publish continues.")
+    assert f"Reason: {reason}" in first and "published" not in first.replace("this publish", "")
+    assert "--subject talea mirror published (observe mode) after the gate would have refused " in last_args
+    assert last.startswith("The public mirror was published (observe mode)") and f"The gate's reason: {reason}" in last
+    _fixed_words(first)
+    _fixed_words(last)
+
+
+@needs_git_and_rsync
+@pytest.mark.parametrize("enforce", [True, False])
+def test_a_gate_email_that_fails_is_said_and_changes_nothing_else(staged, enforce):
+    if enforce:
+        _enforcing(staged)
+    mirror, origin = _a_mirror(staged)
+    r = staged.publish(mirror, also_set={"GATE_EXIT": "1", "ALERT_EXIT": "1"})
+    assert "the email could not be sent" in r.stdout
+    assert r.returncode == (1 if enforce else 0)
+    assert _git(origin, "rev-list", "--count", "main").strip() == ("1" if enforce else "2")
+
+
+# ---- after the gate: the destination, the sync, what is staged, the push ----
+# Each of these ends the publish in EITHER mode (they are not the gate's), so
+# each is run in both. In observe mode after a gate that would have refused,
+# the ending's email also says that the gate would have refused.
+
+BOTH_MODES = pytest.mark.parametrize("enforce", [True, False], ids=["enforce", "observe"])
+
+
+def _in_mode(staged, enforce: bool) -> None:
+    if enforce:
+        _enforcing(staged)
+
+
+DESTINATIONS = [  # (the folder MIRROR_DIR names, what the builder's refusal says)
+    ("{repo}", "this repository, or inside it"),
+    ("{repo}/Data", "this repository, or inside it"),
+    ("{home}/other-checkout", "is a checkout of the private repository"),
+    ("{home}", "the home folder"),
+]
+
+
+@needs_git_and_rsync
+@BOTH_MODES
+@pytest.mark.parametrize("folder, why", DESTINATIONS, ids=[d[0] for d in DESTINATIONS])
+def test_the_sync_never_goes_into_a_folder_the_builder_must_never_write_into(staged, folder, why, enforce):
+    """MIRROR_DIR names the private checkout, a folder inside it, another
+    checkout of the private repository, or home, and that folder is a git
+    repository of its own (so the questions about the repository all answer
+    "yes"). The sync would delete everything there that the public tree does
+    not have. The builder's own judgement of the folder is asked about the
+    real destination before the sync: it refuses, nothing is synced, staged or
+    deleted, every file under home is as it was, and the operator is told."""
+    _in_mode(staged, enforce)
+    target = Path(folder.format(repo=staged.repo, home=staged.home))
+    _repository(target)
+    r = staged.publish(target)
+    assert r.untouched, "something under home changed:\n" + r.stdout + r.stderr
+    assert any(l.startswith("render at ") for l in r.started), "the tree was not built: this test proved nothing"
+    assert f"refusing to build into '{target.resolve()}': " in r.stderr and why in r.stderr, r.stderr
+    _not_published(staged, r, "the mirror folder is one the builder must never write into (mirror_tree.sh exit 2; "
+                              "its reason is in the journal); nothing was synced")
+
+
+@needs_git_and_rsync
+def test_the_sync_goes_ahead_into_an_ordinary_mirror_after_the_builders_judgement(staged):
+    """The judgement is asked, and it is the builder's own: its line is in the
+    journal of an ordinary publish, between the gate and the sync."""
+    mirror, _ = _a_mirror(staged)
+    r = staged.publish(mirror)
+    assert r.returncode == 0 and f"[mirror] '{mirror.resolve()}' may be built into" in r.stderr, r.stdout + r.stderr
+
+
+@needs_git_and_rsync
+def test_what_is_published_is_exactly_the_judged_build(staged):
+    """A stray file in the mirror folder, a file the builder no longer makes,
+    and a reader's .venv and .pytest_cache (which the check never reads) are
+    all removed, never staged: the commit holds the judged tree and nothing
+    else, so no later equality check can fail on them either."""
+    mirror, origin = _a_mirror(staged)          # its commit holds README.md
+    (mirror / "stray.txt").write_text("left by hand\n")
+    (mirror / ".venv").mkdir(); (mirror / ".venv" / "pyvenv.cfg").write_text("x\n")
+    (mirror / ".pytest_cache").mkdir(); (mirror / ".pytest_cache" / "v").write_text("x\n")
+    r = staged.publish(mirror)
+    assert "[mirror] published [es]" in r.stdout, r.stdout + r.stderr
+    names = _git(origin, "ls-tree", "-r", "--name-only", "main").split()
+    assert not [n for n in names if n.startswith((".venv", ".pytest_cache", "stray"))]
+    assert not (mirror / "stray.txt").exists() and not (mirror / ".venv").exists()
+    assert (mirror / ".git").is_dir() and _git(mirror, "status", "--porcelain") == ""
+
+
+def _a_mirror_holding_other_bytes_of_the_same_size_and_time(staged) -> tuple[Path, Path, Path]:
+    """A mirror whose last commit (and working tree) holds, for one file the
+    build copies with its time kept, OTHER bytes of the SAME length, with that
+    file's time set to the source's to the nanosecond. rsync's quick check
+    (size and time) sees nothing to do there."""
+    source = staged.repo / "Data/es/receipts.jsonl"
+    mirror, origin = _a_mirror(staged)
+    other = source.read_text().replace("private", "PRIVATE")
+    assert len(other) == len(source.read_text()) and other != source.read_text()
+    (mirror / "Data/es").mkdir(parents=True)
+    (mirror / "Data/es/receipts.jsonl").write_text(other)
+    _git(mirror, "add", "-A")
+    _git(mirror, "commit", "-q", "-m", "other bytes")
+    _git(mirror, "push", "-q")
+    st = source.stat()
+    os.utime(mirror / "Data/es/receipts.jsonl", ns=(st.st_atime_ns, st.st_mtime_ns))
+    return mirror, origin, source
+
+
+@needs_git_and_rsync
+@BOTH_MODES
+def test_a_file_of_the_same_size_and_time_but_other_bytes_is_replaced_by_the_judged_one(staged, enforce):
+    """The regression: with `rsync -a` alone, the mirror's other bytes stayed,
+    and were what the commit held. With --checksum the judged bytes replace
+    them, and they are what reaches origin."""
+    _in_mode(staged, enforce)
+    mirror, origin, source = _a_mirror_holding_other_bytes_of_the_same_size_and_time(staged)
+    r = staged.publish(mirror)
+    assert r.returncode == 0 and "[mirror] published [es]" in r.stdout, r.stdout + r.stderr
+    assert _git(origin, "show", "main:Data/es/receipts.jsonl") == source.read_text()
+
+
+DIFFERENCES = {  # what makes the staged tree differ from the judged one, after the sync
+    "a sync by size and time only": lambda mirror: {"RSYNC_SYNC_QUICK": "1"},
+    "a file changed after the sync": lambda mirror: {"RSYNC_SYNC_THEN": f"printf 'changed\\n' > '{mirror}/README.md'"},
+    "a file added after the sync": lambda mirror: {"RSYNC_SYNC_THEN": f"printf 'new\\n' > '{mirror}/added.txt'"},
+    "a file git is told is unchanged": lambda mirror: (
+        _git(mirror, "update-index", "--assume-unchanged", "README.md"), {})[1],
+    "a filter that rewrites content": lambda mirror: (
+        _git(mirror, "config", "filter.shout.clean", "tr a-z A-Z"),
+        (mirror / ".git" / "info").mkdir(exist_ok=True),
+        (mirror / ".git" / "info" / "attributes").write_text("README.md filter=shout\n"), {})[3],
+    "a file an ignore rule keeps out": lambda mirror: (
+        (mirror / ".git" / "info").mkdir(exist_ok=True),
+        (mirror / ".git" / "info" / "exclude").write_text("VERIFY.md\n"), {})[2],
+}
+
+
+@needs_git_and_rsync
+@BOTH_MODES
+@pytest.mark.parametrize("which", sorted(DIFFERENCES))
+def test_nothing_is_committed_unless_what_is_staged_is_byte_for_byte_the_judged_tree(staged, which, enforce):
+    """After `git add -A` the index is compared with the judged tree, path by
+    path and blob by blob. Each case here makes them differ in a way the sync
+    alone does not prevent: nothing is committed or pushed, and the operator
+    is told."""
+    _in_mode(staged, enforce)
+    if which == "a sync by size and time only":
+        mirror, origin, _ = _a_mirror_holding_other_bytes_of_the_same_size_and_time(staged)
+    else:
+        mirror, origin = _a_mirror(staged)
+    commits = _git(origin, "rev-list", "--count", "main").strip()
+    head = _git(mirror, "rev-parse", "HEAD")
+    r = staged.publish(mirror, also_set=DIFFERENCES[which](mirror))
+    _not_published(staged, r, "what git staged is not byte for byte the judged tree (the journal says where they differ)")
+    assert _git(mirror, "rev-parse", "HEAD") == head, "something was committed"
+    assert _git(origin, "rev-list", "--count", "main").strip() == commits, "something was pushed"
+
+
+@needs_git_and_rsync
+@BOTH_MODES
+@pytest.mark.parametrize("code, reason", [("127", "rsync is missing (exit 127)"),
+                                          ("23", "the built tree could not be put into the mirror folder (rsync exit 23)")])
+def test_a_sync_that_fails_publishes_nothing_and_emails(staged, code, reason, enforce):
+    """The sync is on the publish path in observe mode too: rsync missing or
+    failing must be loud, never a quiet day without a publish."""
+    _in_mode(staged, enforce)
+    mirror, origin = _a_mirror(staged)
+    before = _own_state(mirror)
+    r = staged.publish(mirror, also_set={"RSYNC_SYNC_EXIT": code})
+    _not_published(staged, r, reason)
+    assert len(_alerts(staged)) == 1 and _own_state(mirror) == before
+    assert _git(origin, "rev-list", "--count", "main").strip() == "1"
+
+
+@needs_git_and_rsync
+def test_the_sync_never_touches_the_mirrors_git_folder(staged):
+    """--exclude=/.git with --delete: rsync leaves an excluded path alone, so a
+    file under .git/ that the build does not have survives byte for byte, and
+    the repository's settings with it."""
+    mirror, origin = _a_mirror(staged)
+    (mirror / ".git" / "stray-under-git").write_text("not the build's\n")
+    config = (mirror / ".git" / "config").read_bytes()
+    r = staged.publish(mirror)
+    assert "[mirror] published [es]" in r.stdout, r.stdout + r.stderr
+    assert (mirror / ".git" / "stray-under-git").read_text() == "not the build's\n"
+    assert (mirror / ".git" / "config").read_bytes() == config
+
+
+def _origin_main(origin: Path) -> str:
+    return _git(origin, "rev-parse", "main").strip()
+
+
+# ---- what is pushed: one commit of the compared tree, on GitHub's main ----
+
+LEFTOVERS = {  # what an earlier publish left committed and unpushed in the mirror folder
+    "a commit holding a stray file": False,
+    "a commit holding a stray file, and one removing it again": True,
+}
+
+
+@needs_git_and_rsync
+@BOTH_MODES
+@pytest.mark.parametrize("which", sorted(LEFTOVERS))
+def test_a_commit_an_earlier_publish_left_unpushed_is_never_pushed(staged, which, enforce):
+    """The regression (round 2): an earlier publish committed and its push
+    failed, and its commit holds a file this run's tree does not have. Pushing
+    the branch would publish that file, although this run compared only its
+    own tree; with a later commit that removes it, the branch's tip is clean
+    and the file is still in its history. Only one commit is pushed: the
+    compared tree, with GitHub's main as its only parent. Neither the file nor
+    a leftover commit ever reaches origin."""
+    _in_mode(staged, enforce)
+    mirror, origin = _a_mirror(staged)
+    first = _origin_main(origin)
+    (mirror / "stray-private.txt").write_text("never public\n")
+    _git(mirror, "add", "-A")
+    _git(mirror, "commit", "-q", "-m", "left unpushed")
+    leftovers = [_git(mirror, "rev-parse", "HEAD").strip()]
+    if LEFTOVERS[which]:
+        _git(mirror, "rm", "-q", "stray-private.txt")
+        _git(mirror, "commit", "-q", "-m", "removed again")
+        leftovers.append(_git(mirror, "rev-parse", "HEAD").strip())
+    r = staged.publish(mirror)
+    assert r.returncode == 0 and "[mirror] published [es]" in r.stdout, r.stdout + r.stderr
+    assert _git(origin, "rev-parse", "main^@").split() == [first], "origin's main did not gain exactly one commit"
+    assert _git(origin, "rev-parse", "main^{tree}") == _git(mirror, "write-tree"), "what was pushed is not the compared index"
+    objects = _git(origin, "rev-list", "--all", "--objects")
+    assert "stray-private.txt" not in objects and not [c for c in leftovers if c in objects]
+    assert _git(mirror, "rev-parse", "HEAD").strip() == _origin_main(origin) and _git(mirror, "status", "--porcelain") == ""
+
+
+
+@needs_git_and_rsync
+@BOTH_MODES
+def test_a_tag_in_the_mirror_folder_never_goes_out_with_the_push(staged, enforce):
+    """Codex, round 3: with `push.followTags` set, git pushes, beside the ref
+    asked for, every annotated tag that points into the pushed history and
+    that origin lacks. Here an annotated tag (its message never judged) sits
+    on GitHub's main, the commit the new one is made on, and the mirror's
+    settings ask for followTags. The changed tree is published; neither the
+    tag's ref nor its object reaches origin."""
+    _in_mode(staged, enforce)
+    mirror, origin = _a_mirror(staged)
+    _git(mirror, "tag", "-a", "unjudged", "-m", "a message nobody judged", "HEAD")
+    tag = _git(mirror, "rev-parse", "unjudged").strip()
+    _git(mirror, "config", "push.followTags", "true")
+    first = _origin_main(origin)
+    r = staged.publish(mirror)
+    assert r.returncode == 0 and "[mirror] published [es]" in r.stdout, r.stdout + r.stderr
+    assert _git(origin, "rev-parse", "main^@").split() == [first], "nothing new was pushed: this test proved nothing"
+    assert _git(origin, "for-each-ref", "refs/tags") == "", "a tag reached origin"
+    present = subprocess.run(["git", "-C", str(origin), "cat-file", "-e", tag], capture_output=True,
+                             env={"PATH": os.environ["PATH"], "HOME": str(origin), "GIT_CONFIG_NOSYSTEM": "1",
+                                  "GIT_CONFIG_GLOBAL": os.devnull})
+    assert present.returncode != 0, "the tag's object reached origin"
+
+@needs_git_and_rsync
+def test_a_hook_in_the_mirror_cannot_change_or_stop_the_commit(staged):
+    """The commit is made with `git commit-tree`, which runs no hook: a
+    pre-commit hook that would fail, or would change the index, does neither."""
+    mirror, origin = _a_mirror(staged)
+    hook = mirror / ".git" / "hooks" / "pre-commit"
+    hook.parent.mkdir(exist_ok=True)
+    hook.write_text("#!/bin/sh\necho hooked > hooked.txt && git add hooked.txt\nexit 1\n")
+    hook.chmod(0o755)
+    r = staged.publish(mirror)
+    assert r.returncode == 0 and "[mirror] published [es]" in r.stdout, r.stdout + r.stderr
+    assert "hooked.txt" not in _git(origin, "ls-tree", "-r", "--name-only", "main").split()
+
+
+@needs_git_and_rsync
+@BOTH_MODES
+def test_a_commit_that_cannot_be_made_is_not_published(staged, enforce):
+    """No author git may use (no email, and git told not to guess one)."""
+    _in_mode(staged, enforce)
+    mirror, origin = _a_mirror(staged)
+    _git(mirror, "config", "--unset", "user.email")
+    _git(mirror, "config", "user.useConfigOnly", "true")
+    head = _git(mirror, "rev-parse", "HEAD")
+    r = staged.publish(mirror)
+    _not_published(staged, r, "git could not commit the judged tree (git exit 128); nothing was pushed")
+    assert _git(mirror, "rev-parse", "HEAD") == head
+    assert _git(origin, "rev-list", "--count", "main").strip() == "1"
+
+
+@needs_git_and_rsync
+@BOTH_MODES
+def test_when_githubs_main_cannot_be_fetched_nothing_is_pushed(staged, enforce):
+    _in_mode(staged, enforce)
+    mirror, origin = _a_mirror(staged)
+    _git(mirror, "remote", "set-url", "origin", str(staged.top / "no-such-origin.git"))
+    head = _git(mirror, "rev-parse", "HEAD")
+    r = staged.publish(mirror)
+    _not_published(staged, r, "GitHub's main could not be fetched (git exit 128); nothing was pushed")
+    assert _git(mirror, "rev-parse", "HEAD") == head
+    assert _git(origin, "rev-list", "--count", "main").strip() == "1"
+
+
+UNTRACKED = {  # how the mirror's branch fails to track main on a remote: (the change, what the journal says)
+    "no upstream": (("branch", "-q", "--unset-upstream"), "tracks 'nothing' on 'nothing'"),
+    "this repository itself (remote '.')": (("config", "branch.main.remote", "."), "tracks 'refs/heads/main' on '.'"),
+    "another branch": (("config", "branch.main.merge", "refs/heads/gh-pages"), "tracks 'refs/heads/gh-pages' on 'origin'"),
+}
+
+
+@needs_git_and_rsync
+@pytest.mark.parametrize("which", sorted(UNTRACKED))
+def test_a_mirror_branch_that_does_not_track_main_pushes_nothing(staged, which):
+    """With remote "." git fetches and pushes within the mirror folder's own
+    repository: its main would move and the publisher say "published" while
+    GitHub got nothing."""
+    mirror, origin = _a_mirror(staged)
+    change, says = UNTRACKED[which]
+    _git(mirror, *change)
+    refs = _git(mirror, "for-each-ref")
+    r = staged.publish(mirror)
+    assert f"[mirror] the mirror's branch main {says}" in r.stdout, r.stdout + r.stderr
+    assert _git(mirror, "for-each-ref") == refs, "a branch moved"
+    _not_published(staged, r, "the mirror's branch does not track main on GitHub; nothing was pushed")
+    assert _git(origin, "rev-list", "--count", "main").strip() == "1"
+
+
+# ---- a push that does not succeed: whether it reached GitHub is not known ----
+
+NOT_KNOWN_MODES = pytest.mark.parametrize("mode", ["enforce", "observe", "observe after a would-refuse"])
+
+
+def _in(staged, mode: str) -> dict[str, str]:
+    if mode == "enforce":
+        _enforcing(staged)
+    return {"GATE_EXIT": "1", "GATE_SAYS": CHECK_SAYS} if mode == "observe after a would-refuse" else {}
+
+
+def _not_known(staged, r, what: str, mode: str) -> str:
+    """The ending after a push that did not succeed: exit 1, and one email
+    that says whether anything reached GitHub is not known; never "NOT
+    published", never "published"."""
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert f"[mirror] NOT KNOWN whether published: {what}" in r.stdout and "published [" not in r.stdout, r.stdout + r.stderr
+    args, body = _alerts(staged)[-1]
+    assert f"--subject talea mirror: not known whether published ({what}) --body-file /dev/stdin" in args, args
+    assert body.startswith(f"Whether the public mirror was published is not known: {what}."), body
+    assert "Whether anything reached GitHub is not known. The next publish retries" in body
+    assert "NOT published" not in body and "nothing new was pushed" not in body
+    assert "The public mirror was published" not in body and "already up to date" not in body
+    repeated = "would have refused this publish (observe mode): the check found 3 finding(s)" in body
+    assert repeated == (mode == "observe after a would-refuse"), body
+    _fixed_words(body)
+    return body
+
+
+def _a_git_whose_push_reaches_github_and_then_fails(staged) -> str:
+    """A PATH on which `git push` really pushes and then exits 128, as when the
+    connection breaks after GitHub took the commit. Every other git command is
+    the real git."""
+    folder = staged.top / "a-push-that-breaks"
+    folder.mkdir()
+    real = shutil.which("git")
+    (folder / "git").write_text(f'#!/bin/sh\ncase " $* " in *" push "*) "{real}" "$@"; exit 128;; esac\nexec "{real}" "$@"\n')
+    (folder / "git").chmod(0o755)
+    return f"{folder}:{staged.path_for_real_writes}"
+
+
+@needs_git_and_rsync
+@NOT_KNOWN_MODES
+def test_a_push_that_reaches_github_and_then_fails_says_the_outcome_is_not_known(staged, mode):
+    """The regression (round 2): a push that exits non-zero was reported as
+    "nothing new was pushed". Here GitHub (the bare origin) takes the commit
+    and the push still fails. The email says the outcome is not known; the
+    next publish finds the judged tree on GitHub's main and pushes nothing."""
+    told = _in(staged, mode)
+    mirror, origin = _a_mirror(staged)
+    r = staged.publish(mirror, also_set={**told, "PATH": _a_git_whose_push_reaches_github_and_then_fails(staged)})
+    assert _git(origin, "rev-list", "--count", "main").strip() == "2", "this test proved nothing: the push did not arrive"
+    _not_known(staged, r, "the push failed (git exit 128)", mode)
+    again = staged.publish(mirror, also_set=told)
+    assert again.returncode == 0, again.stdout + again.stderr
+    assert "[mirror] up to date [es] (GitHub's main already holds the judged tree; nothing was pushed)" in again.stdout
+    assert _git(origin, "rev-list", "--count", "main").strip() == "2"
+
+
+@needs_git_and_rsync
+@NOT_KNOWN_MODES
+def test_a_push_github_refuses_is_not_known_and_the_next_publish_adds_one_commit(staged, mode):
+    told = _in(staged, mode)
+    mirror, origin = _a_mirror(staged)
+    hook = origin / "hooks" / "pre-receive"
+    hook.write_text("#!/bin/sh\nexit 1\n")
+    hook.chmod(0o755)
+    first = _origin_main(origin)
+    r = staged.publish(mirror, also_set=told)
+    _not_known(staged, r, "the push failed (git exit 1)", mode)
+    assert _origin_main(origin) == first
+    hook.unlink()
+    again = staged.publish(mirror, also_set=told)
+    assert again.returncode == 0 and "[mirror] published [es]" in again.stdout, again.stdout + again.stderr
+    assert _git(origin, "rev-parse", "main^@").split() == [first]
+
+
+
+@needs_git_and_rsync
+@NOT_KNOWN_MODES
+def test_a_signal_during_the_push_says_the_outcome_is_not_known(staged, mode):
+    """TERM arrives while git pushes (here: the push reaches GitHub, then the
+    publisher is signalled). The handler runs once the push returns: its
+    email says the outcome is not known, never "NOT published"."""
+    told = _in(staged, mode)
+    mirror, origin = _a_mirror(staged)
+    folder = staged.top / "a-push-then-a-signal"
+    folder.mkdir()
+    real = shutil.which("git")
+    (folder / "git").write_text(f'#!/bin/sh\ncase " $* " in *" push "*) "{real}" "$@"; s=$?; kill -TERM $PPID; exit $s;; esac\n'
+                                f'exec "{real}" "$@"\n')
+    (folder / "git").chmod(0o755)
+    r = staged.publish(mirror, also_set={**told, "PATH": f"{folder}:{staged.path_for_real_writes}"})
+    _not_known(staged, r, "the publisher was stopped by a signal during the push", mode)
+    assert _git(origin, "rev-list", "--count", "main").strip() == "2"
+
+
+# ---- the second email in observe mode ----
+
+@needs_git_and_rsync
+def test_observing_a_would_refuse_when_github_already_holds_the_tree_never_says_published(staged):
+    """Round 2's other reader: after a would-refuse, a publish that pushes
+    nothing new was reported as "published". It says "already up to date"."""
+    mirror, origin = _a_mirror(staged)
+    told = {"GATE_EXIT": "1", "GATE_SAYS": CHECK_SAYS}
+    assert staged.publish(mirror, also_set=told).returncode == 0
+    r = staged.publish(mirror, also_set=told)
+    assert r.returncode == 0 and "published [" not in r.stdout, r.stdout + r.stderr
+    assert "[mirror] up to date [es] (GitHub's main already holds the judged tree; nothing was pushed)" in r.stdout
+    assert _git(origin, "rev-list", "--count", "main").strip() == "2"
+    (_, first), (last_args, last) = _alerts(staged)
+    assert "would have refused (observe mode; continuing)" not in last_args
+    assert "--subject talea mirror already up to date (observe mode) after the gate would have refused " in last_args
+    assert last.startswith("The public mirror was already up to date (observe mode)"), last
+    assert "The gate's reason: the check found 3 finding(s) (exit 1, after " in last
+    assert "was published" not in last and "published (observe" not in last_args
+    _fixed_words(last)
+
+
+@needs_git_and_rsync
+def test_when_the_second_email_cannot_be_sent_the_first_already_said_that_can_happen(staged):
+    """The first email promises a second. It is not sent (the alert fails)
+    although the publish succeeded: the journal says so, and the first email
+    named that cause beside a publisher that stopped."""
+    mirror, origin = _a_mirror(staged)
+    r = staged.publish(mirror, also_set={"GATE_EXIT": "1", "GATE_SAYS": CHECK_SAYS, "ALERT_FAILS_AT": "001"})
+    assert r.returncode == 0 and "[mirror] published [es]" in r.stdout, r.stdout + r.stderr
+    assert "the email could not be sent" in r.stdout.split("[mirror] published [es]", 1)[1]
+    assert _git(origin, "rev-list", "--count", "main").strip() == "2"
+    (_, first), _ = _alerts(staged)
+    assert ("A second email says how the publish ended. If none arrives, either the publisher stopped before it "
+            "could send it or that email could not be sent: the journal says which.") in first
+
+
+# ---- the sync is bound to the folder that was judged ----
+
+def _swap_for_a_link(folder: Path, to: Path) -> str:
+    """A command that renames `folder` away (to <folder>.moved) and puts a
+    link to `to` at its path."""
+    return f"mv '{folder}' '{folder}.moved' && ln -s '{to}' '{folder}'"
+
+
+def _swap_for_a_folder(folder: Path) -> str:
+    """A command that renames `folder` away (to <folder>.moved) and puts a new,
+    real folder at its path: no link anywhere, only another inode."""
+    return f"mv '{folder}' '{folder}.moved' && mkdir '{folder}'"
+
+
+@needs_git_and_rsync
+def test_a_mirror_folder_replaced_by_a_link_before_its_judgement_is_refused(staged):
+    mirror, origin = _a_mirror(staged)
+    before, folder = _snapshot(staged.repo), _snapshot(mirror)
+    r = staged.publish(mirror, during_the_build=_swap_for_a_link(mirror, staged.repo))
+    _not_published(staged, r, "the mirror folder was moved or replaced before it was judged; nothing was synced")
+    assert _snapshot(staged.repo) == before, "the private checkout changed"
+    assert _snapshot(Path(f"{mirror}.moved")) == folder
+    assert _git(origin, "rev-list", "--count", "main").strip() == "1"
+
+
+@needs_git_and_rsync
+@pytest.mark.parametrize("by", ["a link to the private checkout", "another folder"])
+def test_a_mirror_folder_replaced_during_its_judgement_is_refused(staged, by):
+    """Codex, round 2: the folder judged was found by its path, and rsync found
+    it by its path again. Here the judgement passes and then the folder is
+    renamed away and a link to the private checkout, or another folder, put at
+    its path. The publisher is still in the folder it judged and sees the path
+    is no longer that folder: nothing is synced, anywhere."""
+    mirror, origin = _a_mirror(staged)
+    scripts = staged.repo / "scripts"
+    (scripts / "mirror_tree.sh").rename(scripts / "the_real_mirror_tree.sh")
+    (scripts / "mirror_tree.sh").write_text(
+        '#!/usr/bin/env bash\nbash "$(dirname "$0")/the_real_mirror_tree.sh" "$@"; s=$?\n'
+        f'if [ "$1" = --judge-only ]; then '
+        f'{_swap_for_a_link(mirror, staged.repo) if by.startswith("a link") else _swap_for_a_folder(mirror)}; fi\nexit $s\n')
+    before, folder, resolved = _snapshot(staged.repo), _snapshot(mirror), mirror.resolve()
+    r = staged.publish(mirror)
+    assert f"[mirror] '{resolved}' may be built into" in r.stderr, "the judgement did not pass: this test proved nothing"
+    _not_published(staged, r, "the mirror folder was moved or replaced while it was judged; nothing was synced")
+    assert _snapshot(staged.repo) == before, "the private checkout changed"
+    assert _snapshot(Path(f"{mirror}.moved")) == folder
+    assert _git(origin, "rev-list", "--count", "main").strip() == "1"
+
+
+@needs_git_and_rsync
+def test_a_mirror_folder_replaced_by_a_link_after_its_judgement_is_not_what_is_synced(staged):
+    """The same swap just before rsync starts. rsync and git work in "." (the
+    folder that was judged), never through the path: the private checkout is
+    byte for byte as it was, and the judged folder is what is synced and
+    pushed."""
+    mirror, origin = _a_mirror(staged)
+    before = _snapshot(staged.repo)
+    r = staged.publish(mirror, also_set={"RSYNC_SYNC_FIRST": _swap_for_a_link(mirror, staged.repo)})
+    assert (staged.home / "the-mirror.moved").is_dir() and mirror.is_symlink(), "the swap did not happen"
+    assert _snapshot(staged.repo) == before, "the private checkout changed"
+    assert r.returncode == 0 and "[mirror] published [es]" in r.stdout, r.stdout + r.stderr
+    assert (staged.home / "the-mirror.moved" / "index.html").read_text() == "the rendered page\n"
+    assert _git(origin, "show", "main:Data/es/receipts.jsonl") == "private copy of Data/es/receipts.jsonl\n"
+
+
+@needs_git_and_rsync
+@BOTH_MODES
+def test_staging_that_fails_is_not_published(staged, enforce):
+    _in_mode(staged, enforce)
+    mirror, origin = _a_mirror(staged)
+    (mirror / ".git" / "index.lock").write_text("")      # another git is (as far as git knows) at work here
+    r = staged.publish(mirror)
+    _not_published(staged, r, "git could not stage the synced tree (git exit 128)")
+    assert _git(origin, "rev-list", "--count", "main").strip() == "1"
+
+
+def _a_path_where(staged, name: str, script: str) -> str:
+    folder = staged.top / f"a-different-{name}"
+    folder.mkdir()
+    (folder / name).write_text(script)
+    (folder / name).chmod(0o755)
+    return f"{staged.top / 'bin-uv'}:{folder}:{staged.path_for_real_writes}"
+
+
+BEFORE_THE_BUILD = {  # a failure before anything is built: (how, the reason)
+    "no temporary folder": (lambda staged: {"PATH": _a_path_where(staged, "mktemp", "#!/bin/sh\nexit 1\n")},
+                            "no temporary folder could be made for the build; nothing was built"),
+    "no clock": (lambda staged: {"PATH": _a_path_where(
+        staged, "date", '#!/bin/sh\n[ "$*" = "-u +%s" ] && exit 1\nexec /bin/date "$@"\n')},
+                 "the clock could not be read for the render time; nothing was built"),
+    "no public markets": (lambda staged: {"LOOKUP_FAILS": "1"},
+                          "nothing was built (mirror_tree.sh exit 3; its reason is in the journal)"),
+}
+
+
+@needs_git_and_rsync
+@BOTH_MODES
+@pytest.mark.parametrize("which", sorted(BEFORE_THE_BUILD))
+def test_a_publish_that_cannot_build_is_not_published_and_says_so(staged, which, enforce):
+    _in_mode(staged, enforce)
+    mirror, origin = _a_mirror(staged)
+    state, folder = _own_state(mirror), _snapshot(mirror)
+    how, reason = BEFORE_THE_BUILD[which]
+    r = staged.publish(mirror, also_set=how(staged))
+    _not_published(staged, r, reason)
+    assert _own_state(mirror) == state and _snapshot(mirror) == folder
+    assert not [l for l in r.started if "private_content_check.py" in l]
+
+
+AFTER_A_WOULD_REFUSE = {  # observe mode: the gate would have refused, then this goes wrong
+    "the sync fails": (lambda staged, mirror: {"RSYNC_SYNC_EXIT": "23"},
+                       "the built tree could not be put into the mirror folder (rsync exit 23)"),
+    "the fetch fails": (lambda staged, mirror: (
+        _git(mirror, "remote", "set-url", "origin", str(staged.top / "no-such-origin.git")), {})[1],
+                        "GitHub's main could not be fetched (git exit 128); nothing was pushed"),
+    "the second asking fails": (lambda staged, mirror: {
+        "DURING_THE_BUILD": f"git -C '{mirror}' config core.worktree '{staged.repo}'"},
+        "the mirror folder is no longer its own git repository (the journal says which question failed); nothing was synced"),
+}
+
+
+@needs_git_and_rsync
+@pytest.mark.parametrize("which", sorted(AFTER_A_WOULD_REFUSE))
+def test_observing_a_fail_and_then_not_publishing_sends_two_true_emails(staged, which):
+    """The first email says the gate would have refused and the publish goes
+    on; the second, that it was NOT published, why, and that the gate would
+    have refused. No email ever says "published"."""
+    mirror, origin = _a_mirror(staged)
+    how, reason = AFTER_A_WOULD_REFUSE[which]
+    r = staged.publish(mirror, also_set={"GATE_EXIT": "1", "GATE_SAYS": CHECK_SAYS, **how(staged, mirror)})
+    body = _not_published(staged, r, reason)
+    (first_args, first), _ = _alerts(staged)
+    assert "would have refused (observe mode; continuing)" in first_args
+    assert ("Before that, the private-content gate would have refused this publish (observe mode): "
+            "the check found 3 finding(s) (exit 1, after ") in body
+    for _, sent in _alerts(staged):
+        assert "was published" not in sent and "mirror published" not in sent
+    assert _git(origin, "rev-list", "--count", "main").strip() == "1"
+
+
+@needs_git_and_rsync
+@BOTH_MODES
+def test_github_receives_one_update_of_main_per_publish_and_none_otherwise(staged, enforce):
+    """What the fixture holds after every publish, shown once on its own. The
+    target: nothing but the one checked commit reaches GitHub, measured at the
+    receiver (a second push of the same commit to main changes nothing there,
+    and a push to "." never leaves the machine: both out of scope). A
+    publish is ONE ref update at GitHub (the origin's own record): main, from
+    where it was to the new commit, whose only parent is where it was; git's
+    record on the publisher's side shows one push, of that commit, by its id,
+    without tags. Publishing again with nothing new: no update, no push, and
+    the fetch is in git's record. A publish the gate refuses (enforce): no
+    update, no push."""
+    _in_mode(staged, enforce)
+    mirror, origin = _a_mirror(staged)
+    was = _origin_main(origin)
+    r = staged.publish(mirror)
+    assert r.returncode == 0 and "[mirror] published [es]" in r.stdout, r.stdout + r.stderr
+    now = _origin_main(origin)
+    assert r.received == [(origin.resolve(), was, now, "refs/heads/main")]
+    assert [a[1:] for a in r.pushes] == [["-c", "push.followTags=false", "push", "-q", "--no-follow-tags",
+                                          "origin", f"{now}:refs/heads/main"]]
+    again = staged.publish(mirror)
+    assert again.returncode == 0 and "[mirror] up to date [es]" in again.stdout, again.stdout + again.stderr
+    assert again.received == [] and again.pushes == [] and "fetch" in [n for _, n, _, _ in again.git]
+    if enforce:
+        refused = staged.publish(mirror, also_set={"GATE_EXIT": "1", "GATE_SAYS": CHECK_SAYS})
+        assert refused.returncode == 1 and "REFUSED by the private-content gate" in refused.stdout, refused.stdout
+        assert refused.received == [] and refused.pushes == []
+
+
+@needs_git_and_rsync
+@BOTH_MODES
+def test_a_signal_during_the_check_publishes_nothing_and_emails(staged, enforce):
+    """systemd stops a unit by signalling its whole process group: the check
+    ends, and the publisher sends its email and publishes nothing, in either
+    mode. (A KILL cannot be caught: that one leaves the journal only.)"""
+    _in_mode(staged, enforce)
+    mirror, origin = _a_mirror(staged)
+    received = staged.received_now()
+    p = subprocess.Popen([shutil.which("bash"), str(staged.repo / "scripts" / "publish_mirror.sh")],
+                         cwd=staged.home, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                         env=staged.publish_env(mirror, also_set={"GATE_SLEEP": "30"}), start_new_session=True)
+    marker = staged.top / "check-started"
+    for _ in range(600):
+        if marker.exists():
+            break
+        time.sleep(0.05)
+    assert marker.exists(), "the check never started"
+    os.killpg(p.pid, signal.SIGTERM)
+    out, err = p.communicate(timeout=60)
+    assert p.returncode == 1, out + err
+    assert "published [" not in out and "stopped by a signal during the private-content check" in out
+    assert _git(origin, "rev-list", "--count", "main").strip() == "1"
+    assert _hold_the_pushes(out, staged.received_since(received), _git_ran(staged.trace), reached_the_build=True) == []
+    args, body = _alert(staged)
+    assert "NOT published" in args and "Reason: the publisher was stopped by a signal during the private-content check." in body
+    _fixed_words(body)
+
+
+@needs_git_and_rsync
+@BOTH_MODES
+def test_a_signal_during_the_sync_publishes_nothing_and_emails(staged, enforce):
+    """The trap covers every step, not only the gate: TERM while rsync runs
+    (here: just after it, before the publisher goes on) ends the publish with
+    its email, nothing committed."""
+    _in_mode(staged, enforce)
+    mirror, origin = _a_mirror(staged)
+    head = _git(mirror, "rev-parse", "HEAD")
+    r = staged.publish(mirror, also_set={"RSYNC_SYNC_THEN": "kill -TERM $(ps -o ppid= -p $PPID)"})
+    _not_published(staged, r, "the publisher was stopped by a signal during the sync")
+    assert _git(mirror, "rev-parse", "HEAD") == head
+    assert _git(origin, "rev-list", "--count", "main").strip() == "1"
+
+
+def test_the_mode_is_in_the_script_and_the_order_is_build_gate_ask_judge_sync_stage_compare_fetch_commit_push():
+    raw = (ROOT / "scripts" / "publish_mirror.sh").read_text()
+    code = _code(raw)
+    assert re.findall(r"^GATE_MODE=.*$", code, re.M) == ["GATE_MODE=observe"]
+    assert "${GATE_MODE:-" not in code and "GATE_MODE=\"$" not in code      # never from the environment
+    order = [code.index(s) for s in (
+        "trap stopped TERM INT HUP",
+        "export TALEA_RENDER_EPOCH",
+        'SLUGS="$(bash scripts/mirror_tree.sh "$TREE")"',
+        "team/private_content_check.py",
+        'cd -P -- "$MIRROR"',
+        "mirror_is_its_own_repository . \\",
+        'bash "$REPO/scripts/mirror_tree.sh" --judge-only "$MIRROR"',
+        "the mirror folder was moved or replaced while it was judged",
+        'rsync -a --checksum --delete --exclude=/.git "$TREE/" ./',
+        "git add -A",
+        "staged_is_the_judged_tree \\",
+        'JUDGED_TREE="$(git write-tree)"',
+        'git fetch -q "$REMOTE" refs/heads/main',
+        'git commit-tree "$JUDGED_TREE" -p "$BASE"',
+        'git -c push.followTags=false push -q --no-follow-tags "$REMOTE" "$NEW_COMMIT:refs/heads/main"',
+        'echo "[mirror] published [$SLUGS]"',
+    )]
+    assert order == sorted(order), order
+    # after entering the judged folder, nothing goes through its path again
+    after = code[code.index('cd -P -- "$MIRROR"'):]
+    assert code.index('in_the_judged_folder() { [ ! -L "$MIRROR" ] && [ . -ef "$MIRROR" ]; }') < code.index(after)
+    assert [l for l in after.splitlines() if "$MIRROR" in l and "echo" not in l] == [
+        'cd -P -- "$MIRROR" 2>/dev/null || fail "the mirror folder could not be entered; nothing was synced"',
+        'bash "$REPO/scripts/mirror_tree.sh" --judge-only "$MIRROR"; JUDGED=$?']
+    # How many pushes a publish makes, and of what, is held at run time from git's
+    # own record, after every publish (_hold_the_pushes). Here only a cheap
+    # backstop on the text: no push option that forces or sends more, and one
+    # commit, by commit-tree
+    assert not re.search(r"push.*(?:--force|\s-f\b|\s\+|--tags|--follow-tags|--mirror|--all)", code)
+    assert not re.search(r"\bgit (?:-C \S+ )?commit\b(?!-tree)", code)
+    # the trap is dropped right after the push has succeeded (Sonnet, round 3), and,
+    # for an up-to-date publish, after the branch is set (and in `fail` and `not_known`)
+    assert '|| not_known "the push failed (git exit $PUSHED)"\n  trap - TERM INT HUP' in code
+    assert [m.start() for m in re.finditer(r"^trap - TERM INT HUP$", code, re.M)] == [code.index("\ntrap - TERM INT HUP\n") + 1]
+    assert code.index("\ntrap - TERM INT HUP\n") > code.index('push -q --no-follow-tags "$REMOTE"')
+    # the emails' words come from this script, never from the check, the base or a folder
+    for name in ("send_alert", "common_lines", "fail", "not_known", "stopped", "gate_fails"):
+        body = code.split(f"\n{name}() {{", 1)[1].split("\n}\n", 1)[0]
+        for never in ("GATE_OUT", "MIRROR_BASE", "$MIRROR", "$TREE", "$BUILD_ROOT"):
+            assert never not in body, (name, never)
+    # every `exit` but the last two (published or up to date; the repository not found) is in `fail`, `not_known`
+    exits = re.findall(r"\bexit [0-9]\b", code)
+    assert exits.count("exit 0") == 1 and code.rstrip().endswith("exit 0")
+
+
 @needs_git_and_rsync
 def test_the_publisher_does_nothing_when_git_is_a_link_into_another_repository(staged):
     """The mirror folder's `.git` is a link to the private checkout's own git
     folder. `[ -d "$MIRROR/.git" ]` follows the link and is true. Left alone,
     `git add -A && git commit` in the mirror folder would write a commit into
-    the PRIVATE repository. Nothing is built, nothing staged, exit 0."""
+    the PRIVATE repository. Nothing is built, nothing staged, and the operator
+    is told (exit 1)."""
     _repository(staged.repo)
     mirror = staged.home / "the-mirror"
     mirror.mkdir()
     (mirror / ".git").symlink_to(staged.repo / ".git")
     head = _git(staged.repo, "rev-parse", "HEAD")
     r = staged.publish(mirror)
-    assert r.returncode == 0, r.stdout + r.stderr
     assert "/.git is a link, not the mirror's own git folder" in r.stdout, r.stdout + r.stderr
-    assert "nothing built or published" in r.stdout and "published [" not in r.stdout
+    _not_published(staged, r, "the mirror folder is not its own git repository (the journal says which question failed); nothing was built")
     assert r.started == [], f"the build was started: {r.started}"
     assert _git(staged.repo, "rev-parse", "HEAD") == head and r.untouched
 
@@ -791,15 +1890,15 @@ def test_the_publisher_does_nothing_when_gits_working_tree_is_another_folder(sta
     """The mirror folder holds a real `.git` whose `core.worktree` points at the
     private checkout. To git, the tree to stage is then the private checkout.
     The publisher asks git which folder its working tree is, and it is not the
-    mirror folder: nothing is built, nothing staged, nothing pushed, exit 0."""
+    mirror folder: nothing is built, nothing staged, nothing pushed, and the
+    operator is told (exit 1)."""
     mirror, origin = _a_mirror(staged)
     _git(mirror, "config", "core.worktree", str(staged.repo))
     state = _own_state(mirror)
     r = staged.publish(mirror)
     assert _own_state(mirror) == state, "the mirror's repository changed although publication was refused"
-    assert r.returncode == 0, r.stdout + r.stderr
     assert "git's working tree for" in r.stdout and "is not that folder" in r.stdout, r.stdout + r.stderr
-    assert "nothing built or published" in r.stdout and "published [" not in r.stdout
+    _not_published(staged, r, "the mirror folder is not its own git repository (the journal says which question failed); nothing was built")
     assert r.started == [], f"the build was started: {r.started}"
     assert _git(origin, "rev-list", "--count", "main").strip() == "1", "something was pushed"
     assert r.untouched
@@ -855,9 +1954,9 @@ def test_a_git_that_does_not_list_its_repository_variables_publishes_nothing(sta
     mirror, origin = _a_mirror(staged)
     path = _a_git_that_answers_differently(staged, "--local-env-vars", "GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY")
     r = staged.publish(mirror, also_set={"PATH": path})
-    assert r.returncode == 0, r.stdout + r.stderr
     assert "git did not list GIT_COMMON_DIR among its repository variables" in r.stdout, r.stdout + r.stderr
-    assert "published [" not in r.stdout and r.started == [] and r.untouched
+    _not_published(staged, r, "git did not list the repository variables it must clear; nothing was built")
+    assert r.started == [] and r.untouched
     assert _git(origin, "rev-list", "--count", "main").strip() == "1"
 
 
@@ -870,9 +1969,9 @@ def test_a_git_too_old_to_answer_a_question_publishes_nothing(staged):
     mirror, origin = _a_mirror(staged)
     path = _a_git_that_answers_differently(staged, "--absolute-git-dir", "--absolute-git-dir")
     r = staged.publish(mirror, also_set={"PATH": path})
-    assert r.returncode == 0, r.stdout + r.stderr
     assert "git's folder for" in r.stdout and "is not its own .git (it says: '--absolute-git-dir')" in r.stdout, r.stdout + r.stderr
-    assert "published [" not in r.stdout and r.started == [] and r.untouched
+    _not_published(staged, r, "the mirror folder is not its own git repository (the journal says which question failed); nothing was built")
+    assert r.started == [] and r.untouched
     assert _git(origin, "rev-list", "--count", "main").strip() == "1"
 
 
@@ -926,9 +2025,8 @@ def test_the_publisher_does_nothing_when_gits_common_folder_is_another_repositor
     (mirror / ".git" / "commondir").write_text(f"{staged.repo}/.git\n")
     r = staged.publish(mirror)
     assert r.untouched, "something changed (the private repository's refs, index or objects, or the mirror):\n" + r.stdout + r.stderr
-    assert r.returncode == 0, r.stdout + r.stderr
     assert "git's common folder for" in r.stdout and "is not its own .git" in r.stdout, r.stdout + r.stderr
-    assert "nothing built or published" in r.stdout and "published [" not in r.stdout
+    _not_published(staged, r, "the mirror folder is not its own git repository (the journal says which question failed); nothing was built")
     assert r.started == [], f"the build was started: {r.started}"
     assert _git(origin, "rev-list", "--count", "main").strip() == "1"
 
@@ -957,8 +2055,8 @@ def test_a_relative_mirror_folder_means_one_folder_whatever_cd_would_search(stag
     """MIRROR_DIR is a bare name, and no folder of that name is where the name
     is resolved from (the checkout's root). A folder of that name does exist
     on CDPATH, and it is a repository with an origin. The name is resolved
-    once, with CDPATH cleared, to nothing: nothing is built, and the folder on
-    CDPATH and its origin are exactly as they were."""
+    once, with CDPATH cleared, to nothing: nothing is built, the operator is
+    told, and the folder on CDPATH and its origin are exactly as they were."""
     elsewhere = staged.home / "found-by-cdpath"
     competing, origin = elsewhere / "the-mirror", elsewhere / "the-mirror-origin.git"
     competing.mkdir(parents=True)
@@ -966,7 +2064,8 @@ def test_a_relative_mirror_folder_means_one_folder_whatever_cd_would_search(stag
     _repository(competing, origin)
     state = _own_state(competing)
     r = staged.publish("the-mirror", also_set={"CDPATH": str(elsewhere)})
-    assert r.returncode == 0 and "the-mirror not initialized (no such folder); skipping" in r.stdout, r.stdout + r.stderr
+    assert "[mirror] the-mirror not initialized (no such folder)" in r.stdout, r.stdout + r.stderr
+    _not_published(staged, r, "the mirror folder does not exist; nothing was built")
     assert r.started == [] and r.untouched and _own_state(competing) == state
     assert _git(origin, "rev-list", "--count", "main").strip() == "1"
 
@@ -976,13 +2075,14 @@ def test_the_publisher_asks_again_after_the_build_and_before_staging(staged):
     """The repository is the mirror's own when the publisher starts, and its
     working tree is pointed at the private checkout WHILE the tree is being
     built. The publisher asks git a second time before `git add`: the tree is
-    built, and nothing is staged or pushed."""
+    built, nothing is synced, staged or pushed, and the operator is told."""
     mirror, origin = _a_mirror(staged)
     state = _own_state(mirror)
     r = staged.publish(mirror, during_the_build=f"git -C '{mirror}' config core.worktree '{staged.repo}'")
-    assert r.returncode == 0, r.stdout + r.stderr
-    assert (mirror / "Data/es/receipts.jsonl").exists(), "the tree was not built: this test proved nothing"
-    assert "built but NOT published" in r.stdout and "published [" not in r.stdout, r.stdout + r.stderr
+    assert any(l.startswith("render at ") for l in r.started), "the tree was not built: this test proved nothing"
+    assert not (mirror / "Data").exists(), "the built tree reached the mirror folder before the second asking"
+    _not_published(staged, r, "the mirror folder is no longer its own git repository (the journal says which "
+                              "question failed); nothing was synced")
     # The MIRROR's own repository is as it was: no commit, no branch moved, and
     # its index byte for byte, so nothing was staged before the second asking.
     assert _own_state(mirror) == state, "the mirror's repository changed although publication was refused"
@@ -1033,11 +2133,11 @@ def test_the_script_builds_into_a_folder_outside(staged, folder, given_from):
 
 
 def test_the_publisher_says_why_nothing_was_built():
-    """The publisher never fails the tick, so when the builder refuses or cannot
-    resolve the markets it exits 0. Its line must not blame the market lookup
-    for a refusal: it gives the builder's exit code and points at its reason."""
+    """When the builder refuses or cannot resolve the markets, the publisher's
+    line (and its email) must not blame the market lookup for a refusal: it
+    gives the builder's exit code and points at its reason."""
     publish = _code((ROOT / "scripts" / "publish_mirror.sh").read_text())
-    assert 'SLUGS="$(bash scripts/mirror_tree.sh "$MIRROR")"; BUILT=$?' in publish
+    assert 'SLUGS="$(bash scripts/mirror_tree.sh "$TREE")"; BUILT=$?' in publish
     assert "mirror_tree.sh exit $BUILT" in publish
 
 

@@ -11,6 +11,7 @@ import sys
 import urllib.request
 from datetime import datetime, timezone
 from email.message import EmailMessage
+from email.utils import getaddresses
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -254,23 +255,63 @@ def email_digest(summary: dict, *, _smtp=smtplib.SMTP) -> None:
             body = "TICK TROUBLE: " + "; ".join(problems) + "\n\n" + body
             if not subject.startswith("ALERT"):
                 subject = "ALERT — " + subject
-        sender = _env("ALERT_SMTP_USER") or to
-        msg = EmailMessage()
-        msg["From"] = sender
-        msg["To"] = to
-        if sender != to:
-            # the alert account keeps a copy in its own inbox: it is the one
-            # mailbox the project's agents can read
-            msg["Cc"] = sender
-        msg["Subject"] = subject
-        msg.set_content(body)
-        with _smtp("smtp.gmail.com", 587, timeout=30) as s:
-            s.starttls()
-            s.login(_env("ALERT_SMTP_USER") or to, password)
-            s.send_message(msg)
+        _send_email(to, password, subject, body, _smtp)
         print(f"[esios-paper] digest emailed ({subject!r})")
     except Exception as exc:
         print(f"[esios-paper] digest email FAILED (non-fatal): {exc}")
+
+
+class RecipientRefused(Exception):
+    """The mail server accepted the message but refused the operator's address."""
+
+
+def _send_email(to: str, password: str, subject: str, body: str, _smtp) -> None:
+    """One email from the alert account (ALERT_SMTP_USER, default the
+    recipient) to ALERT_EMAIL_TO, the alert account copied. Raises on failure.
+    The server may accept some recipients and refuse others (send_message
+    returns those it refused): a refused or unreadable operator's address is a
+    failure; a refused copy is only reported. Only integers and fixed words are
+    printed (the same rule as the writers' failure email)."""
+    sender = _env("ALERT_SMTP_USER") or to
+    msg = EmailMessage()
+    msg["From"] = sender
+    msg["To"] = to
+    if sender != to:
+        # the alert account keeps a copy in its own inbox: it is the one
+        # mailbox the project's agents can read
+        msg["Cc"] = sender
+    msg["Subject"] = subject
+    msg.set_content(body)
+    with _smtp("smtp.gmail.com", 587, timeout=30) as s:
+        s.starttls()
+        s.login(sender, password)
+        refused = s.send_message(msg) or {}
+    to_addrs = [addr for _, addr in getaddresses([to]) if addr]
+    to_codes = [int(refused[a][0]) for a in to_addrs if a in refused]
+    if to_codes or not to_addrs:
+        raise RecipientRefused(f"the operator's address was refused or unreadable (SMTP codes {to_codes})")
+    if refused:
+        print(f"[esios-paper] the server refused the copy only "
+              f"(SMTP codes {[int(code) for code, _ in refused.values()]})")
+
+
+def email_alert(subject: str, body: str, *, _smtp=smtplib.SMTP) -> bool:
+    """Send one alert now, through the digest's channel and configuration.
+    True when it was sent. Never raises: a missing configuration or a failed
+    send is printed (the journal keeps it) and returns False, so the caller
+    can say so."""
+    to = _env("ALERT_EMAIL_TO")
+    password = _env("ALERT_SMTP_PASSWORD")
+    if not to or not password:
+        print("[esios-paper] alert email NOT sent: ALERT_EMAIL_TO / ALERT_SMTP_PASSWORD not configured")
+        return False
+    try:
+        _send_email(to, password, subject, body, _smtp)
+    except Exception as exc:
+        print(f"[esios-paper] alert email FAILED: {type(exc).__name__}")
+        return False
+    print(f"[esios-paper] alert emailed ({subject!r})")
+    return True
 
 
 def ots_manifest(label: str, receipts: Path | None = None,
@@ -563,6 +604,20 @@ def cmd_markets() -> int:
     return 0
 
 
+def cmd_alert(args: list[str], *, _send=None) -> int:
+    """`alert --subject <text> --body-file <path>`: email one alert now (the
+    mirror's private-content gate uses it when it refuses). Exit 0 sent, 1 not
+    sent, 2 a usage error."""
+    send = _send or email_alert
+    try:
+        subject = args[args.index("--subject") + 1]
+        body = Path(args[args.index("--body-file") + 1]).read_text()
+    except (ValueError, IndexError, OSError) as exc:
+        print(f"usage: alert --subject <text> --body-file <path> ({type(exc).__name__})")
+        return 2
+    return 0 if send(subject, body) else 1
+
+
 def main() -> int:
     args = sys.argv[1:]
     cmd = args[0] if args else "tick"
@@ -576,8 +631,10 @@ def main() -> int:
         return cmd_status()
     if cmd == "markets":
         return cmd_markets()
+    if cmd == "alert":
+        return cmd_alert(args[1:])
     print(f"unknown command {cmd!r}; use: tick [--market <slug>] | status | "
-          "markets [--driver <d>|--public]")
+          "markets [--driver <d>|--public] | alert --subject <text> --body-file <path>")
     return 2
 
 

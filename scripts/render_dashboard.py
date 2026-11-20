@@ -8,6 +8,7 @@ Default out: site/index.html (the mirror publishes it via GitHub Pages).
 from __future__ import annotations
 
 import json
+import os
 import statistics
 import sys
 from datetime import date, datetime, timedelta, timezone
@@ -78,8 +79,22 @@ def _disclosure(cfg: dict) -> str:
     return (f'<div class="banner disclosure"><b>Disclosure.</b> {note}</div>')
 
 
+RENDER_EPOCH = "TALEA_RENDER_EPOCH"
+
+
 def _now() -> datetime:
-    """Page generation time (a seam so tests can pin the clock)."""
+    """Page generation time (a seam so tests can pin the clock).
+
+    TALEA_RENDER_EPOCH (whole seconds since 1970, UTC), when set, IS the time:
+    the publisher sets it once per publish, so that the private-content check's
+    own rebuild of the tree (team/private_content_check.py --tree) renders the
+    same minute, byte for byte, as the build it is proving. Set but not whole
+    seconds is an error, never a silent fall back to the clock."""
+    raw = os.environ.get(RENDER_EPOCH)
+    if raw is not None:
+        if not (raw.isascii() and raw.isdigit()):
+            raise ValueError(f"{RENDER_EPOCH} must be whole seconds since 1970")
+        return datetime.fromtimestamp(int(raw), ZoneInfo("Europe/Madrid"))
     return datetime.now(ZoneInfo("Europe/Madrid"))
 
 

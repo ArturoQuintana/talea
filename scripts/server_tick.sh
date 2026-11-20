@@ -18,6 +18,15 @@ export PATH="$HOME/.local/bin:$PATH"
 git pull --ff-only \
   || git pull --rebase \
   || { git rebase --abort 2>/dev/null; echo "[talea] pre-tick pull failed (continuing on local state)"; }
+# The trust anchor for the mirror's private-content gate (register D-37): main
+# as this tick fetched it, taken BEFORE any tick commits. scripts/publish_mirror.sh
+# judges the tree it builds against it. Without it the gate cannot judge: in
+# observe mode the publisher emails that and publishes; in enforce mode it
+# publishes nothing. If the pull failed, it is the main of the last successful
+# fetch: older, still reviewed.
+MIRROR_BASE="$(git rev-parse --verify --quiet 'refs/remotes/origin/main^{commit}')" \
+  || { MIRROR_BASE=""; echo "[talea] no origin/main to anchor the mirror's gate (the gate cannot judge the publish: the publisher emails)"; }
+export MIRROR_BASE
 # Silent shadow markets FIRST (best-effort, never affect the ES tick): their
 # Data/<slug>/ changes ride the ES tick's git_backup. They DO OTS-anchor (each
 # gets its own Data/<slug>/ots Bitcoin proof — see cmd_tick + the test
