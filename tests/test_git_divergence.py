@@ -369,11 +369,11 @@ WORKFLOWS = ROOT / ".github" / "workflows"
 # between them.)
 PINNED = {
     # the one job `test`: the append-only check, the suite, the ledger re-derivation
-    "ci.yml": {"sha256": "782d2e27eb4e7807a3e748b84d1cc1fb6eec8eb5dc1978b24d90071db6ba66d5", "writes": None},
+    "ci.yml": {"sha256": "0a750ba3ff2ff94d554b54640709620f8ce4d6ed78bfc191de205503f57f387c", "writes": None},
     # WRITER: ERCOT's ladder; commits and pushes Data/ercot
-    "ercot.yml": {"sha256": "a8e64d775ae9016020be8d886404ebd9b9b0ff6a0d4cd1729d619201d7f92672", "writes": "ercot"},
+    "ercot.yml": {"sha256": "a49f3c44e7c54b839ca378543ca36df19c3c1a87c611a938aa248e5836761aa1", "writes": "ercot"},
     # WRITER: JP's ladder; commits and pushes Data/jp
-    "jp.yml": {"sha256": "6d0b52c5f2ef8d96d2c29f0a22e58c34ee647fbacd54eae3b2eb18ace4c2d9c8", "writes": "jp"},
+    "jp.yml": {"sha256": "39504b2d360660afa947c50231ce6e120c96d0a2b2d21cd6364cc6216498a403", "writes": "jp"},
     # read-only: every registered market still reaches origin
     "liveness.yml": {"sha256": "a479901cc898052651cc5ff522a9fcb8c16bdd464cd131fdf05da7cf5cc109af", "writes": None},
     # read-only: the public mirror is still being published after the server's windows
@@ -907,6 +907,155 @@ def test_a_failed_tick_fails_its_step_under_the_shell_github_uses(tmp_path, work
 
 
 PIPE = re.compile(r"(?<!\|)\|(?!\|)\s+[A-Za-z_./${(]")    # `a | b`, `a | { b; }`; never `||` nor a case's "x"|"y"
+
+
+def _jobs(text: str) -> dict[str, str]:
+    """Each job's own text, by its name (two-space keys under `jobs:`)."""
+    body = text.split("\njobs:\n", 1)[1]
+    parts = re.split(r"(?m)^  ([A-Za-z_][\w-]*):\n", body)
+    return {parts[i]: parts[i + 1] for i in range(1, len(parts) - 1, 2)}
+
+
+@pytest.mark.parametrize("workflow", sorted(WRITER_WORKFLOWS))
+def test_each_writer_pushes_with_the_writers_environments_deploy_key(workflow):
+    """Register D-35 (8), E6: the tick job names the main-only `writers`
+    environment and checks out with its deploy key; nothing else in the file
+    names either (the notify job needs no key and no environment)."""
+    _private_workflows()
+    text = (WORKFLOWS / workflow).read_text()
+    code = "\n".join(l for l in text.splitlines() if not l.lstrip().startswith("#"))
+    jobs = _jobs(code)
+    assert sorted(jobs) == ["key-probe", "notify", "tick"]
+    checkout = ("      - uses: actions/checkout@v4\n        with:\n"
+                "          ssh-key: ${{ secrets.WRITERS_DEPLOY_KEY }}\n")
+    for name in ("tick", "key-probe"):
+        assert re.search(r"(?m)^    environment: writers$", jobs[name]), f"the {name} job must name the writers environment"
+        assert checkout in jobs[name], f"the {name} job checks out with the key"
+    assert "environment" not in jobs["notify"] and "WRITERS_DEPLOY_KEY" not in jobs["notify"]
+    assert code.count("secrets.WRITERS_DEPLOY_KEY") == 3, "the key is read in the two checkouts and the probe's fingerprint step only"
+
+
+@pytest.mark.parametrize("workflow", sorted(WRITER_WORKFLOWS))
+def test_the_key_probe_only_dry_runs_a_push_and_never_ticks(workflow):
+    """E6 round 2: a manual run with `key_probe` ticked runs the key-probe job
+    alone. It dry-runs a push to a branch over SSH with the key and stops; the
+    tick job is skipped, so nothing is fetched, settled or committed."""
+    _private_workflows()
+    code = "\n".join(l for l in (WORKFLOWS / workflow).read_text().splitlines() if not l.lstrip().startswith("#"))
+    jobs = _jobs(code)
+    probe = jobs["key-probe"]
+    assert re.search(r"(?m)^    if: inputs\.key_probe == true$", probe)
+    assert re.search(r"(?m)^    if: \$\{\{ !inputs\.key_probe \}\}$", jobs["tick"]), "the tick never runs on a key probe"
+    assert "permissions:\n      contents: read" in probe
+    assert "git push --dry-run origin HEAD:refs/heads/key-probe" in probe
+    for word in ("uv ", "talea tick", "git commit", "git add", "HEAD:main"):
+        assert word not in probe, f"the key probe must not {word!r}"
+    assert "key_probe:\n        description:" in code and "type: boolean\n        default: false" in code
+
+
+def _probe_script(workflow: str) -> str:
+    return _step(workflow, "Key probe")["run"]
+
+
+def _test_key(tmp_path: Path) -> tuple[str, str]:
+    """A throwaway ed25519 key made here: (private key text, its SHA256 fingerprint)."""
+    key = tmp_path / "k"
+    subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "test", "-f", str(key)], check=True)
+    fp = subprocess.run(["ssh-keygen", "-lf", str(key) + ".pub"], capture_output=True, text=True,
+                        check=True).stdout.split()[1]
+    return key.read_text(), fp
+
+
+@pytest.mark.parametrize("workflow", sorted(WRITER_WORKFLOWS))
+@pytest.mark.parametrize("case", ["ok", "refused", "no ssh address", "empty key", "not a key"])
+def test_the_key_probe_says_ok_only_when_an_ssh_push_dry_run_passes(tmp_path, workflow, case):
+    """The probe's own script, run as GitHub runs it, with `git push` replaced
+    by a stand-in on PATH. OK only when the key's fingerprint can be derived,
+    origin's push address is SSH AND the dry run passes. The OK line names the
+    fingerprint (round 3: the merger compares it with actions-writers'), and
+    no line of the private key ever reaches the output; the key file is gone."""
+    runner = tmp_path / "runner"
+    runner.mkdir()
+    _git(runner, "init", "-q", "-b", "main")
+    _git(runner, "remote", "add", "origin",
+         "https://example.test/owner/repo.git" if case == "no ssh address" else SSH_ADDRESS)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    real_git = shutil.which("git")
+    (bin_dir / "git").write_text(f'#!/bin/sh\nif [ "$1" = push ]; then echo "push $*" >> "{tmp_path}/pushes"; '
+                                 f'exit {0 if case != "refused" else 128}; fi\nexec "{real_git}" "$@"\n')
+    (bin_dir / "git").chmod(0o755)
+    private, fp = _test_key(tmp_path)
+    key = {"empty key": "", "not a key": "not a private key\n"}.get(case, private)
+    temp = tmp_path / "runner-temp"
+    temp.mkdir()
+    step = _step(workflow, "Key probe")
+    r = subprocess.run([*conftest.github_shell(step), step["run"]], cwd=runner, capture_output=True, text=True,
+                       env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "KEY": key,
+                            "RUNNER_TEMP": str(temp)})
+    pushes = (tmp_path / "pushes").read_text() if (tmp_path / "pushes").exists() else ""
+    out = r.stdout + r.stderr
+    body = [l for l in private.splitlines() if l and not l.startswith("-----")]
+    assert body and not any(l in out for l in body), "no line of the private key may reach the log"
+    assert not any(part in out for l in body for part in (l[:20], l[-20:])), "nor any part of one"
+    assert list(temp.iterdir()) == [], "the key file is removed"
+    if case == "ok":
+        assert r.returncode == 0 and "KEY PROBE OK" in r.stdout, out
+        assert f"key fingerprint: {fp}" in r.stdout and f"deploy key, {fp}, may push" in r.stdout
+        assert pushes == "push push --dry-run origin HEAD:refs/heads/key-probe\n"
+    else:
+        assert r.returncode != 0 and "KEY PROBE FAILED" in r.stdout and "KEY PROBE OK" not in r.stdout, out
+        assert pushes == ("push push --dry-run origin HEAD:refs/heads/key-probe\n" if case == "refused" else "")
+
+
+KEY_LINE = "push credential: deploy key (the writers environment's WRITERS_DEPLOY_KEY)"
+TOKEN_LINE = "push credential: GITHUB_TOKEN, NOT the deploy key: WRITERS_DEPLOY_KEY was empty here"
+SSH_ADDRESS = "git@github.com:example/repo.git"          # synthetic: tests/ is mirrored
+
+
+@pytest.mark.parametrize("workflow", sorted(WRITER_WORKFLOWS))
+@pytest.mark.parametrize("url, pushurl, says", [
+    (SSH_ADDRESS, None, KEY_LINE),
+    ("https://example.test/owner/repo.git", None, TOKEN_LINE),
+    ("https://example.test/owner/repo.git", SSH_ADDRESS, KEY_LINE),     # the PUSH address decides
+    (SSH_ADDRESS, "https://example.test/owner/repo.git", TOKEN_LINE),
+])
+def test_the_commit_step_names_the_credential_of_its_push_address(tmp_path, workflow, url, pushurl, says):
+    """E6: each run's log says which credential its push uses, read from the
+    PUSH address (`git remote get-url --push origin`), so a fall-back to the
+    token is seen before stage 1 is on. Said even when there is nothing to
+    commit."""
+    slug = WRITER_WORKFLOWS[workflow]
+    runner = tmp_path / "runner"
+    runner.mkdir()
+    _git(runner, "init", "-q", "-b", "main")
+    _write(runner, f"Data/{slug}/prices.json", "[]\n")
+    _git(runner, "add", "-A")
+    _git(runner, "-c", "user.name=t", "-c", "user.email=t@example.test", "commit", "-qm", "seed")
+    _git(runner, "remote", "add", "origin", url)
+    if pushurl:
+        _git(runner, "remote", "set-url", "--push", "origin", pushurl)
+    r = _run_commit_step(workflow, runner)
+    assert r.returncode == 0, r.stdout + r.stderr
+    first, second = r.stdout.splitlines()[:2]
+    assert first.startswith(says), r.stdout
+    assert second == f"no {slug.upper()} changes"
+
+
+@pytest.mark.parametrize("workflow", sorted(WRITER_WORKFLOWS))
+def test_on_a_real_push_the_line_is_printed_and_the_receipts_land(tmp_path, workflow):
+    """An actual push path, with a push address that differs from the fetch
+    address (the same local origin, spelled as a file:// URL): the line is the
+    TOKEN line, because neither is the deploy key's SSH address, and the run's
+    receipts reach origin."""
+    slug = WRITER_WORKFLOWS[workflow]
+    origin, runner = _runner(tmp_path, slug, server_changes_lock=False)
+    _git(runner, "remote", "set-url", "--push", "origin", origin.as_uri())
+    assert _git(runner, "remote", "get-url", "--push", "origin") != _git(runner, "remote", "get-url", "origin")
+    r = _run_commit_step(workflow, runner)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert r.stdout.splitlines()[0].startswith(TOKEN_LINE), r.stdout
+    assert _delivered(tmp_path, origin, slug, r, runner)
 
 
 @pytest.mark.parametrize("workflow", sorted(WRITER_WORKFLOWS))

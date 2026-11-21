@@ -107,7 +107,8 @@ def test_concurrency_is_the_tick_jobs_and_a_drill_has_its_own_group(name):
     assert "concurrency" not in _top_keys(text), \
         f"{name}: a workflow-level group would hold the notify job inside it"
     jobs = _jobs(text)
-    assert sorted(jobs) == ["notify", "tick"]
+    assert sorted(jobs) == ["key-probe", "notify", "tick"]   # key-probe: E6, a manual check that never ticks
+    assert "concurrency" not in "".join(jobs["key-probe"])
     tick = jobs["tick"]
     at = tick.index("concurrency:")
     assert tick[at + 1:at + 3] == [
@@ -232,10 +233,15 @@ class SMTP:
         if "quit-interrupt" in FAIL:
             raise KeyboardInterrupt()
         return False
-    def starttls(self):
+    def starttls(self, context=None):
         if "starttls" in FAIL:
             raise OSError("starttls failed")
+        import ssl
         self.log["calls"].append("starttls")
+        self.log["tls"] = None if context is None else {
+            "is_context": isinstance(context, ssl.SSLContext),
+            "check_hostname": context.check_hostname,
+            "verify_required": context.verify_mode == ssl.CERT_REQUIRED}
     def login(self, user, password):
         if "login" in FAIL:
             raise OSError("authentication failed")
@@ -292,6 +298,8 @@ def test_a_failed_run_sends_one_email_naming_the_run_and_the_attempt(tmp_path):
     assert len(sent) == 1
     assert (sent[0]["host"], sent[0]["port"], sent[0]["timeout"]) == ("smtp.gmail.com", 587, 30)
     assert sent[0]["calls"][:2] == ["starttls", ["login", "alerts@example.test", "pw"]]
+    # register T-42: the server's certificate and name are verified before the login
+    assert sent[0]["tls"] == {"is_context": True, "check_hostname": True, "verify_required": True}
     headers, body = _message(sent)
     assert headers == {"Subject": "talea ercot-tick FAILURE: run 5 attempt 2",
                        "From": "alerts@example.test", "To": "operator@example.test",

@@ -13,11 +13,10 @@ subject carries the label, the count and the newest receipt's date. It holds
 no state. Each red run sends its own email, and red-main is unchanged.
 
 The sending is a COPY of the writers' failure email (the notify job in
-ercot.yml and jp.yml), with one difference: STARTTLS here verifies the
-server's certificate and name (`ssl.create_default_context()`) before the
-alert account's credentials are sent; the writers' copies call starttls()
-without a context, which the register tracks for them separately. Same
-account, recipient and copy, the same 587 path, and the same failure handling: one try around everything from
+ercot.yml and jp.yml): STARTTLS that verifies the server's certificate and
+name (`ssl.create_default_context()`, in both since register T-42) before the
+alert account's credentials are sent, the same account, recipient and copy,
+the same 587 path, and the same failure handling: one try around everything from
 the message to the server's answer; only exception types, numeric SMTP codes
 and fixed words printed, never an address; exit 1 when the settings are
 missing or the operator's address is refused. The writers keep their own
