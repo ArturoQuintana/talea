@@ -22,6 +22,38 @@ pre-registered comparisons are defined on the booked P&L.
 
     python3 scripts/feasibility_report.py            # ES
     python3 scripts/feasibility_report.py --all      # every market under Data/
+    python3 scripts/feasibility_report.py --confirmatory-executable --as-of ISO
+
+--confirmatory-executable is the block the reporting note for Spain's
+confirmatory look requires (docs/multiple-comparisons-policy.md, "Reporting
+note for the confirmatory look"): over exactly the 90 non-tied days that decide
+climatology vs persistence, each day's daily-reset executable P&L for both,
+paired into wins, ties and losses, and both strategies' booked and executable
+totals over those days. NOT PRE-REGISTERED: it decides nothing. It prints
+nothing but one line until the confirmatory look is reached at --as-of, and
+--as-of is required, so the figures belong to one instant. It FAILS CLOSED:
+if the ledger cannot be read or parsed, or any counting row of the pair
+(version 1, a P&L, settled no later than --as-of, target from 2026-08-01) has
+a null or non-finite pnl_eur, it prints one fixed line with no ledger detail
+and exits 1, so it never prints where compare_strategies would fail or count
+differently.
+
+LIMIT: like compare_strategies --decision-look, it prints whenever it is run
+once the 90th non-tied day has settled at --as-of. The release point is the
+month-end review, a procedure; the rules define no cutoff instant for code to
+check.
+
+NOBODY RUNS IT ON THE REAL LEDGER BEFORE THE MONTH-END REVIEW THAT TAKES THE
+CONFIRMATORY LOOK. The note says these figures are computed once, at the look,
+at the look's own instant, and the statistical referee recomputes them with the
+rest. Its tests use synthetic ledgers only.
+
+The day set is selected HERE, independently of scripts/compare_strategies.py
+(which imports talea), under the same rules: version-1 rows of the two
+strategies with a P&L, settled no later than --as-of, targets from 2026-08-01;
+a day counts when both have a row; the daily delta rounded to cents is a tie
+below 0.01 EUR; the set stops at the 90th non-tied day. The tests check that
+both scripts pick the same window.
 
 Stdlib-only and imports nothing from talea, like verify_ledger.py.
 """
@@ -30,7 +62,9 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import math
 from collections import defaultdict
+from datetime import datetime, timezone
 from itertools import combinations
 from pathlib import Path
 
@@ -128,6 +162,141 @@ def market_report(slug: str) -> dict[str, dict]:
     return out
 
 
+# ---- the confirmatory pair's executable figures (not pre-registered) ----------
+
+CONF_MARKET = "es"
+CONF_A = "battery-2h2h-climatology"
+CONF_B = "battery-2h2h-persistence"
+CONF_SINCE = "2026-08-01"
+CONF_N = 90
+TIE_EPS = 0.01
+REFUSED = ("ES confirmatory pair: REFUSED. The ledger could not be read, or a counting "
+           "row of the pair is not as the rules require. No figure is printed.")
+
+
+class Refused(Exception):
+    """The pair's rows cannot be counted as compare_strategies counts them."""
+
+
+def _instant(text: str) -> datetime:
+    d = datetime.fromisoformat(text)
+    return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+
+
+def _row_counts(row: dict, as_of: datetime) -> bool:
+    """compare_strategies' rule for the confirmatory look: a row with a P&L,
+    not settled later than as_of (a row with no settlement time counts)."""
+    if "pnl_eur" not in row:
+        return False
+    ts = row.get("settled_at")
+    return not (ts and _instant(ts) > as_of)
+
+
+def _finite_pnl(row: dict) -> float:
+    """Accept exactly what compare_strategies counts as a number (a bool too,
+    at its numeric value, as Python arithmetic gives it there); refuse null,
+    NaN and +-inf."""
+    v = row["pnl_eur"]
+    if not isinstance(v, (int, float)) or not math.isfinite(v):
+        raise Refused("pnl_eur")
+    return float(v)
+
+
+def confirmatory_days(rows: list[dict], as_of: datetime) -> dict:
+    """The confirmatory comparison's day set at as_of: {"reached", "days"
+    (the first CONF_N non-tied days, in order), "selected" (every shared day up
+    to the CONF_N-th non-tied one, in order, as (day, is_tie)), "shared",
+    "ties"}. Raises Refused if any counting row's pnl_eur is null or not
+    finite, wherever it lies."""
+    by_day: dict[str, dict[str, dict]] = {}
+    for r in rows:
+        if str(r.get("strategy_version") or "1") != "1" or r["strategy"] not in (CONF_A, CONF_B):
+            continue
+        if _row_counts(r, as_of) and r["target"] >= CONF_SINCE:
+            _finite_pnl(r)
+            by_day.setdefault(r["target"], {})[r["strategy"]] = r
+    days: list[str] = []
+    selected: list[tuple[str, bool]] = []
+    for day in sorted(by_day):
+        v = by_day[day]
+        if CONF_A not in v or CONF_B not in v:
+            continue
+        tie = abs(round(v[CONF_A]["pnl_eur"] - v[CONF_B]["pnl_eur"], 2)) < TIE_EPS
+        selected.append((day, tie))
+        if not tie:
+            days.append(day)
+            if len(days) == CONF_N:
+                break
+    reached = len(days) == CONF_N
+    if not reached:
+        return {"reached": False, "days": [], "selected": [], "shared": None,
+                "ties": None, "rows": {}}
+    return {"reached": True, "days": days, "selected": selected, "shared": len(selected),
+            "ties": sum(t for _, t in selected), "rows": by_day}
+
+
+def _wtl(deltas: list[float]) -> tuple[int, int, int]:
+    d = [round(x, 2) for x in deltas]
+    return (sum(x >= TIE_EPS for x in d), sum(abs(x) < TIE_EPS for x in d),
+            sum(x <= -TIE_EPS for x in d))
+
+
+def confirmatory_executable(as_of: datetime, slug: str = CONF_MARKET) -> dict:
+    """The reporting note's block, or {"reached": False} before the look.
+    Raises Refused, carrying no ledger detail, if the ledger cannot be read,
+    parsed or counted as the rules require."""
+    d = DATA / slug
+    try:
+        sel = confirmatory_days(load_jsonl(d / "ledger.jsonl"), as_of)
+    except Exception:                 # noqa: BLE001 — any detail could name a row
+        raise Refused("ledger") from None
+    if not sel["reached"]:
+        return {"reached": False}
+    prices = load_prices(d / "prices.json")
+    params = {(r["target"], r["strategy"], str(r.get("strategy_version") or "1")): r.get("params", {})
+              for r in load_jsonl(d / "receipts.jsonl")}
+    hourly: dict[str, dict[int, float]] = defaultdict(dict)
+    for ts, p in prices.items():
+        hourly[ts[:10]][int(ts[11:13])] = p
+    booked = {CONF_A: 0.0, CONF_B: 0.0}
+    executable = {CONF_A: 0.0, CONF_B: 0.0}
+    deltas = []
+    for day in sel["days"]:
+        x = {}
+        for s in (CONF_A, CONF_B):
+            e = sel["rows"][day][s]
+            booked[s] += e["pnl_eur"]
+            x[s] = dispatch(e["buy_hours"], e["sell_hours"], hourly[day],
+                            params[(day, s, "1")])[0]
+            executable[s] += x[s]
+        deltas.append(x[CONF_A] - x[CONF_B])
+    wins, ties, losses = _wtl(deltas)
+    return {"reached": True, "as_of": as_of.isoformat(), "first_day": sel["days"][0],
+            "last_day": sel["days"][-1], "shared": sel["shared"], "booked_ties": sel["ties"],
+            "wins": wins, "ties": ties, "losses": losses,
+            "booked": booked, "executable": executable}
+
+
+def format_confirmatory_executable(r: dict) -> str:
+    if not r["reached"]:
+        return ("ES confirmatory pair: the confirmatory look is not reached at this "
+                "instant; no executable figures (they are computed once, at the look).")
+    a, b = CONF_A, CONF_B
+    return "\n".join([
+        "ES confirmatory pair, executable figures — NOT PRE-REGISTERED, DECIDES NOTHING",
+        "  valid only at the month-end review that takes the confirmatory look "
+        "(Amendment 1, clause 5)",
+        f"  as of {r['as_of']}; the verdict's {CONF_N} non-tied days "
+        f"{r['first_day']}..{r['last_day']} ({r['shared']} shared days; their "
+        f"{r['booked_ties']} booked ties are not among them)",
+        f"  daily-reset executable, climatology better / tied / worse: "
+        f"{r['wins']} / {r['ties']} / {r['losses']}",
+        f"  booked totals:     climatology {r['booked'][a]:,.2f}  persistence {r['booked'][b]:,.2f}",
+        f"  executable totals: climatology {r['executable'][a]:,.2f}  "
+        f"persistence {r['executable'][b]:,.2f}",
+        "  No claim is made from these figures."])
+
+
 def format_market(slug: str, report: dict[str, dict]) -> str:
     lines = [f"{slug.upper()}",
              f"  {'strategy':<26}{'days':>5}{'out of order':>14}{'booked':>12}"
@@ -146,7 +315,28 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--market", default="es")
     ap.add_argument("--all", action="store_true", help="every market under Data/")
+    ap.add_argument("--confirmatory-executable", action="store_true",
+                    help="the reporting note's not-pre-registered block for Spain's "
+                         "confirmatory look; only at the month-end review that takes it")
+    ap.add_argument("--as-of", help="ISO instant; required with --confirmatory-executable")
     args = ap.parse_args(argv)
+    if args.confirmatory_executable:
+        if not args.as_of or args.all or args.market != CONF_MARKET:
+            ap.error("--confirmatory-executable needs --as-of and takes neither --all "
+                     "nor another --market")
+        try:
+            as_of = _instant(args.as_of)
+        except ValueError:
+            ap.error("--as-of is not an ISO instant")
+        try:
+            result = confirmatory_executable(as_of)
+        except Refused:
+            print(REFUSED)
+            return 1
+        print(format_confirmatory_executable(result))
+        return 0
+    if args.as_of:
+        ap.error("--as-of is used only with --confirmatory-executable")
     slugs = (sorted(p.parent.name for p in DATA.glob("*/ledger.jsonl"))
              if args.all else [args.market])
     for slug in slugs:

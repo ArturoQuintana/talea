@@ -207,12 +207,12 @@ the whole window were pushed late in one batch on 2026-11-10: their author
 dates are original, their committer dates are the recovery time, so for
 those days this mirror's history and the OTS proofs — not the private repo's
 commit times — are the corroboration.
-Data/esios_prices.json (the independent cross-check route) updates
-WEEKLY by design — staleness under 7 days is normal.
+The deep history (Data/esios_prices.json, the independent cross-check
+route) is not published on this mirror (see DATA-SOURCES.md).
 
 ## 2. The arithmetic claim (P&L follows from receipts + public prices)
 
-Prices are public: apidatos.ree.es (no key) or api.esios.ree.es (free key),
+Anyone can fetch the prices: apidatos.ree.es (no key) or api.esios.ree.es (free key),
 both derived from the OMIE auction. For any settled day:
 
     pnl = sum(price[h] for h in sell_hours) * 1.0 MW * 0.85
@@ -221,12 +221,21 @@ both derived from the OMIE auction. For any settled day:
 
 The oracle is the same formula over the day's 2 cheapest / 2 dearest hours;
 capture = pnl / oracle_pnl. The exact code is `src/talea/loop.py`
-(pure functions, unit-tested: `uv run pytest`). The independent second price
-route is cross-checked weekly (`scripts/crosscheck_routes.py`).
+(pure functions, unit-tested: `uv run pytest`). A second, independent price
+route (REE's ESIOS API) is cross-checked against `prices.json` weekly in the
+private repository (`scripts/crosscheck_routes.py`). A checkout of this mirror's
+current tree does not include `Data/esios_prices.json`, which the cross-check
+needs; earlier copies remain in the mirror's git history (section 1,
+DATA-SOURCES.md).
 
-**One command that does all of the above for you:**
+**One command that re-derives the ledger:**
 
     uv run python scripts/verify_ledger.py --all [--verify-ots]
+
+It checks each market's ledger against that market's own `Data/<slug>/prices.json`
+and receipts. It does not run the two-route cross-check above, which is separate:
+a checkout of this mirror's current tree does not include `Data/esios_prices.json`,
+which the cross-check needs; earlier copies remain in the mirror's git history.
 
 `scripts/verify_ledger.py` re-derives EVERY settlement from `prices.json` and
 each receipt's own recorded params — from scratch, importing nothing from the

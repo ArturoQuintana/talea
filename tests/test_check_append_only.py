@@ -648,6 +648,9 @@ SHA_EXPR = "${{ github.event.pull_request.head.sha }}"
 # Everything after the check, pinned too: the whole job is these seven steps.
 REST = [
     ["- uses: astral-sh/setup-uv@v5"],
+    ["- name: The public markets and their sources are exactly the reserved allowlist",
+     "  run: |",
+     "    python3 -I -S team/publication_allowlist.py --repo ."],
     ["- name: No private content in the tree the mirror gets",
      "  env:",
      '    UV_LOCKED: "1"',
@@ -719,7 +722,7 @@ def _ci_problems(text: str) -> list[str]:
         problems.append("the append-only step is missing or duplicated")
     if steps[2:] != REST:
         problems.append("after the check the job must be exactly: the installer, the "
-                        "private-content check, the locked install, the suite with its coverage "
+                        "publication allowlist, the private-content check, the locked install, the suite with its coverage "
                         "gate, the slow tests, the ledger re-derivation, and the public README's command in the "
                         "mirror's tree; in that order, "
                         "nothing added, dropped or reworded")

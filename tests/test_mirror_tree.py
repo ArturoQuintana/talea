@@ -30,8 +30,8 @@ TREE = ROOT / "scripts" / "mirror_tree.sh"
 
 # The whole list. A change to what the mirror carries is a PUBLIC change: it
 # must change this, where a reader of the pull request will see it.
-DATA_INCLUDES = {'--include="/$s/***"', "--include='/esios_prices.json'",
-                 "--include='/calibration/***'", "--include='/README-MOVED.md'"}
+# Not Data/esios_prices.json: the deep history is not published (register T-36, D-26).
+DATA_INCLUDES = {'--include="/$s/***"', "--include='/calibration/***'", "--include='/README-MOVED.md'"}
 FOLDERS = ["Data/", "src/", "tests/", "scripts/"]
 ROOT_FILES = {"VERIFY.md", "GOVERNANCE.md", "DATA-SOURCES.md", "pyproject.toml", "uv.lock",
               ".python-version", "LICENSE"}
@@ -138,7 +138,7 @@ DIVIDER = "# ---- the list ----"
 # What this is NOT: a judgement of the change. It only makes a change
 # impossible to miss; judging it is the readers' and the operator's work.
 PINNED_SCRIPTS = {
-    "scripts/mirror_tree.sh": "5fef3ceea85e2419fdeae0eec1c5ea149abf9f8a6ebdff0dae50d774c9d691de",
+    "scripts/mirror_tree.sh": "9464b4828bebe8fb62d8b36180d6b0a2913423a5251646448dab4860b4f97963",
     # (a comment line between the two, so that two pull requests changing one
     # line each can be merged by git)
     "scripts/publish_mirror.sh": "8bfd10e51c44bf175995cf73409498275c39477c81cfb02d3ac41cb4d6c892f8",
@@ -157,6 +157,13 @@ SLUGS="$(uv run --no-dev python -m talea markets --public 2>/dev/null)"
 if [ -z "$SLUGS" ]; then
   echo "[mirror] could not resolve public markets" >&2; exit 3
 fi
+ALLOW_OUT="$(timeout -k 30 120 uv run --no-project python -I -S team/publication_allowlist.py \
+    --repo . --public "$SLUGS" 2>&1)"
+ALLOWED=$?
+[ -z "$ALLOW_OUT" ] || printf '%s\n' "$ALLOW_OUT" >&2
+if [ "$ALLOWED" -ne 0 ]; then
+  echo "[mirror] the publication allowlist did not pass (exit $ALLOWED): nothing is built" >&2; exit 3
+fi
 mkdir -p "$MIRROR" || exit 2
 uv run --no-dev python scripts/render_dashboard.py --site "$MIRROR" >&2
 mkdir -p "$MIRROR/docs"
@@ -165,7 +172,6 @@ for s in $SLUGS; do INCLUDES+=(--include="/$s/***"); done
 rsync -a --delete --delete-excluded \
   --exclude='__pycache__' --exclude='.tick.lock' \
   "${INCLUDES[@]}" \
-  --include='/esios_prices.json' \
   --include='/calibration/***' \
   --include='/README-MOVED.md' \
   --exclude='*' \
@@ -230,8 +236,14 @@ def test_the_mirror_carries_exactly_this_list():
     assert copied - {"docs/$d"} == ROOT_FILES | set(RENAMED), copied
     assert len(re.findall(r"^\s*(?:\[.*\] && )?(?:rsync|cp) ", code, re.M)) == 9, (
         "a copy was added to or removed from mirror_tree.sh: account for it above")
+    # The one place the list may name team/: the publication allowlist's check
+    # (register T-43) is RUN from there, never copied. Its two lines are word
+    # for word in THE_LIST above; everything else must name none of NEVER.
+    call = ('ALLOW_OUT="$(timeout -k 30 120 uv run --no-project python -I -S team/publication_allowlist.py \\\n'
+            '    --repo . --public "$SLUGS" 2>&1)"\n')
+    assert code.count(call) == 1, "the publication allowlist's check is not run exactly once, as pinned"
     for name in NEVER:
-        assert name not in code, f"{name} must never be named in the mirror's list"
+        assert name not in code.replace(call, ""), f"{name} must never be named in the mirror's list"
 
 
 @pytest.mark.usefixtures("_rsync_and_uv")
@@ -245,10 +257,12 @@ def test_the_built_tree_holds_the_list_and_nothing_private(tmp_path):
 
     tree = tmp_path / "mirror"
     # What an earlier publish could have left there and must not survive this
-    # one: a market that is private now, a stray file beside the markets, and
-    # files since deleted from the three code folders. Only the copies' own
-    # --delete and --delete-excluded remove them.
+    # one: a market that is private now, a stray file beside the markets, the
+    # deep history (published until T-36), and files since deleted from the
+    # three code folders. Only the copies' own --delete and --delete-excluded
+    # remove them.
     stale = ["Data/it/receipts.jsonl", "Data/it/prices.json", "Data/stray.json", "Data/es/gone.jsonl",
+             "Data/esios_prices.json",
              "src/talea/gone.py", "tests/test_gone.py", "scripts/gone.sh"]
     for name in stale:
         (tree / name).parent.mkdir(parents=True, exist_ok=True)
@@ -265,8 +279,8 @@ def test_the_built_tree_holds_the_list_and_nothing_private(tmp_path):
     top = {p.name for p in tree.iterdir()}
     pages = {"index.html"} | {f"{s}.html" for s in public if not MARKETS[s].primary}
     assert top == {"Data", "src", "tests", "scripts", "docs", ".github", "README.md"} | ROOT_FILES | pages, top
-    assert {p.name for p in (tree / "Data").iterdir()} == set(public) | {
-        "esios_prices.json", "calibration", "README-MOVED.md"}
+    assert {p.name for p in (tree / "Data").iterdir()} == set(public) | {"calibration", "README-MOVED.md"}
+    assert not (tree / "Data" / "esios_prices.json").exists(), "the deep history is not published (T-36)"
     assert {p.name for p in (tree / "docs").iterdir()} == DOCS, "every named document, and no other"
     for name in sorted(DOCS):
         assert (tree / "docs" / name).read_bytes() == (ROOT / "docs" / name).read_bytes(), name
@@ -546,6 +560,10 @@ case "$*" in
     echo "render at ${{TALEA_RENDER_EPOCH:-unset}}" >> "{started}"
     if [ -n "${{REAL_WRITES:-}}" ]; then for last; do :; done; printf 'the rendered page\\n' > "$last/index.html"; fi
     if [ -n "${{DURING_THE_BUILD:-}}" ]; then sh -c "$DURING_THE_BUILD"; fi;;
+  *"publication_allowlist.py"*)
+    for last; do :; done; echo "allowlist asked about: $last" >> "{started}"
+    [ -z "${{ALLOWLIST_SAYS:-}}" ] || printf '%s\\n' "$ALLOWLIST_SAYS"
+    exit "${{ALLOWLIST_EXIT:-0}}";;
   *"private_content_check.py"*)
     echo "check at ${{TALEA_RENDER_EPOCH:-unset}} in $(pwd -P)" >> "{started}"
     [ -z "${{GATE_SAYS:-}}" ] || printf '%s\\n' "$GATE_SAYS"
@@ -555,10 +573,15 @@ esac
 ''')
     (lookup_bin / "uv").chmod(0o755)
     # `timeout` too: it records how it was asked, then runs the command, unless
-    # the test says the time ran out (exit 124, as GNU timeout).
+    # the test says the time ran out (exit 124, as GNU timeout): for the
+    # private-content check with TIMEOUT_FIRES, for the publication allowlist's
+    # check with ALLOWLIST_TIMEOUT_FIRES.
     (lookup_bin / "timeout").write_text(f'''#!/bin/sh
 echo "timeout $1 $2 $3" >> "{started}"
-[ -z "${{TIMEOUT_FIRES:-}}" ] || exit 124
+case "$*" in
+  *publication_allowlist.py*) [ -z "${{ALLOWLIST_TIMEOUT_FIRES:-}}" ] || exit 124;;
+  *) [ -z "${{TIMEOUT_FIRES:-}}" ] || exit 124;;
+esac
 shift 3; exec "$@"
 ''')
     (lookup_bin / "timeout").chmod(0o755)
@@ -588,7 +611,7 @@ exec "{real_rsync}" "$@"
         (stand_ins / name).chmod(0o755)
 
     def run(folder, cwd=repo, script=repo / "scripts" / "mirror_tree.sh", home_set=True,
-            real_writes=False, lookup_fails=False, judge_only=False):
+            real_writes=False, lookup_fails=False, judge_only=False, extra_env=None):
         if started.exists():
             started.unlink()
         before = _snapshot(home)
@@ -601,6 +624,7 @@ exec "{real_rsync}" "$@"
             env["REAL_WRITES"] = "1"
         if lookup_fails:
             env["LOOKUP_FAILS"] = "1"
+        env.update(extra_env or {})
         r = subprocess.run([shutil.which("bash"), str(script), *(["--judge-only"] if judge_only else []), str(folder)],
                            cwd=cwd, text=True,
                            capture_output=True, timeout=60,   # a guard that never answers is red
@@ -1684,6 +1708,38 @@ def _a_path_where(staged, name: str, script: str) -> str:
     return f"{staged.top / 'bin-uv'}:{folder}:{staged.path_for_real_writes}"
 
 
+# Every way the publication allowlist's check can fail to pass, as the stand-ins
+# play it: a finding (1), a check that cannot run (2), no finish (124), and
+# uv missing or unable to start the interpreter (127).
+ALLOWLIST_FAILS = {"finds": {"ALLOWLIST_EXIT": "1"}, "cannot run": {"ALLOWLIST_EXIT": "2"},
+                   "does not finish": {"ALLOWLIST_TIMEOUT_FIRES": "1"},
+                   "cannot start": {"ALLOWLIST_EXIT": "127"}}
+ALLOWLIST_EXITS = {"finds": 1, "cannot run": 2, "does not finish": 124, "cannot start": 127}
+
+
+@pytest.mark.parametrize("what", sorted(ALLOWLIST_FAILS))
+def test_a_check_that_does_not_pass_builds_nothing_and_exits_3(staged, what):
+    """Fail-closed: whatever the allowlist's check does other than pass, the
+    builder prints no slug, creates and writes nothing at the destination, and
+    exits 3 (the publisher's "nothing was built"). Its line says the exit."""
+    new = staged.home / "elsewhere" / "new"
+    r = staged(str(new), extra_env={**ALLOWLIST_FAILS[what], "ALLOWLIST_SAYS": "publication allowlist: 1 finding(s)"})
+    assert r.returncode == 3 and r.stdout == "", r.stdout + r.stderr
+    code = ALLOWLIST_EXITS[what]
+    assert f"[mirror] the publication allowlist did not pass (exit {code}): nothing is built" in r.stderr, r.stderr
+    assert not new.exists() and r.untouched
+    assert not [l for l in r.started if l.startswith(("mkdir ", "rsync ", "cp ")) or "render_dashboard" in l], r.started
+    if what != "does not finish":
+        assert "publication allowlist: 1 finding(s)" in r.stderr, "the check's own lines reach the journal"
+
+
+def test_a_check_that_passes_lets_the_build_go_on(staged):
+    new = staged.home / "elsewhere" / "new"
+    r = staged(str(new), extra_env={"ALLOWLIST_SAYS": "publication allowlist: pass"})
+    assert r.returncode == 0 and r.stdout.split() == ["es"], r.stderr
+    assert "publication allowlist: pass" in r.stderr and "did not pass" not in r.stderr
+
+
 BEFORE_THE_BUILD = {  # a failure before anything is built: (how, the reason)
     "no temporary folder": (lambda staged: {"PATH": _a_path_where(staged, "mktemp", "#!/bin/sh\nexit 1\n")},
                             "no temporary folder could be made for the build; nothing was built"),
@@ -1692,6 +1748,11 @@ BEFORE_THE_BUILD = {  # a failure before anything is built: (how, the reason)
                  "the clock could not be read for the render time; nothing was built"),
     "no public markets": (lambda staged: {"LOOKUP_FAILS": "1"},
                           "nothing was built (mirror_tree.sh exit 3; its reason is in the journal)"),
+    # The publication allowlist (register T-43) is fail-closed in BOTH modes:
+    # it is not the gate, and does not follow the gate's observe mode.
+    **{f"the allowlist {what}": (lambda staged, how=how: how,
+                                 "nothing was built (mirror_tree.sh exit 3; its reason is in the journal)")
+       for what, how in ALLOWLIST_FAILS.items()},
 }
 
 
@@ -2116,8 +2177,9 @@ def test_when_the_markets_cannot_be_resolved_nothing_is_created(staged):
 ])
 def test_the_script_builds_into_a_folder_outside(staged, folder, given_from):
     """The guard must not refuse everything. Here the stand-ins record what the
-    script went on to start: the lookup, the render and the copies, every one
-    of them aimed at the folder as it is on disk."""
+    script went on to start: the lookup, the publication allowlist's check, the
+    render and the copies, every one of them aimed at the folder as it is on
+    disk."""
     places = {"repo": staged.repo, "home": staged.home}
     r = staged(folder.format(**places), cwd=places[given_from])
     assert r.returncode == 0, r.stderr
@@ -2127,7 +2189,12 @@ def test_the_script_builds_into_a_folder_outside(staged, folder, given_from):
              "link-out": "elsewhere", "{home}/mirror": "mirror"}[folder]
     target = str((staged.home / where).resolve())
     assert r.started[0].startswith("uv ") and "markets --public" in r.started[0], "the lookup comes first"
-    assert r.started[1] == f"mkdir -p {target}", "and only then is the folder created"
+    assert r.started[1:4] == [
+        "timeout -k 30 120",
+        "uv run --no-project python -I -S team/publication_allowlist.py --repo . --public es",
+        "allowlist asked about: es"], \
+        "then the publication allowlist judges the slugs just resolved, under the gate's interpreter and a timeout"
+    assert r.started[4] == f"mkdir -p {target}", "and only then is the folder created"
     copies = [l for l in r.started if l.startswith(("rsync ", "cp "))]
     assert len(copies) >= 9 and all(f" {target}/" in l for l in copies), copies
 

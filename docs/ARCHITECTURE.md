@@ -19,8 +19,8 @@ The loop is market-agnostic (a frozen `Market` dataclass parameterizes zone,
 timezone, commit deadline, currency, Data/<slug>/ tree, and fetch client — the
 strategy panel, P&L math, and guards are shared). Eight markets run today:
 
-    market  zone      source / license               cur  deadline  writer        public tier
-    ES      Spain     apidatos.ree.es · public        EUR  13:00     server        Pages + Bitcoin-OTS
+    market  zone      source / terms                 cur  deadline  writer        public tier
+    ES      Spain     apidatos.ree.es · see note      EUR  13:00     server        Pages + Bitcoin-OTS
     DE      DE-LU     SMARD.de · CC BY 4.0            EUR  12:00     server        Pages + OTS
     IT      IT-SUD    ENTSO-E A44 · token, derived    EUR  12:00     server        private (license)
     PT      PT        ENTSO-E A44 · token, derived    EUR  12:00     server        private (license)
@@ -28,6 +28,9 @@ strategy panel, P&L math, and guards are shared). Eight markets run today:
     GB      GB        Elexon BMRS Market Index · open  GBP  11:00     server        Pages + OTS (within-day index feed, see note)
     JP      JEPX      JEPX spot · open (attribution)  JPY  10:00     GitHub Actions private (silent-first; redistributable)
     ERCOT   HB_NORTH  ERCOT MIS NP4-190 · public/redist USD 10:00    GitHub Actions Pages + OTS
+
+ES note: no licence for redistributing REE's prices is verified; REData's API
+page states none. See DATA-SOURCES.md, "Spain (ES)".
 
 GB note (audit finding 2026-09-07): GB's feed is the Elexon BMRS Market Index
 (APXMIDP leg) — a traded within-day reference index that populates
@@ -64,9 +67,10 @@ has its guards) + `test_docs_in_sync` (this table must match the registry's flag
 Per-market VERTICAL modules (`markets/<slug>/`): **all eight markets are vertical
 modules now** (Phase 2 code refactor complete), and **ES data lives at `Data/es/`
 like every other market** (Stage B, 2026-08-28) — `Data/` root holds only
-shared/project artifacts (`esios_prices.json` deep history, `calibration/`) plus one
-subdir per market; no market is privileged. `loop.py` no longer imports a market's
-fetcher at
+shared/project artifacts (`calibration/`, and the `esios_prices.json` deep history, which
+the mirror's current tree does not carry: earlier copies remain in the mirror's git
+history, see DATA-SOURCES.md) plus one subdir per market; no market is privileged. `loop.py` no
+longer imports a market's fetcher at
 module scope (the ES fetcher is imported lazily inside `_default_market`), so the
 core is free of a module-time market dependency. **A `markets/<slug>/fetch.py`
 exists to house a
@@ -159,8 +163,15 @@ library. See docs/market-plugin-refactor-plan.md.
     route B (weekly) ─▶ Data/esios_prices.json    independent deep history
                                                   (2015→), cross-checked vs A;
                                                   disagreement → CROSSCHECK-
-                                                  ALERTS.log (committed, loud)
-    everything ──▶ git ──▶ mirror ──▶ Pages dashboard + routines + auditors
+                                                  ALERTS.log (committed, loud).
+                                                  esios_prices.json and
+                                                  CROSSCHECK-ALERTS.log are
+                                                  not in the mirror's current
+                                                  tree; earlier copies of
+                                                  esios_prices.json remain in
+                                                  its git history
+                                                  (DATA-SOURCES.md).
+    allowlisted files ──▶ git ──▶ mirror ──▶ Pages dashboard + routines + auditors
 
 ## Strategy panel (registry in loop.STRATEGIES)
 

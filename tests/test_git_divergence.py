@@ -369,7 +369,7 @@ WORKFLOWS = ROOT / ".github" / "workflows"
 # between them.)
 PINNED = {
     # the one job `test`: the append-only check, the suite, the ledger re-derivation
-    "ci.yml": {"sha256": "9449318641307293190d42b614fd413bd8c0b8d9b5b0c6f72991e25099b370b5", "writes": None},
+    "ci.yml": {"sha256": "782d2e27eb4e7807a3e748b84d1cc1fb6eec8eb5dc1978b24d90071db6ba66d5", "writes": None},
     # WRITER: ERCOT's ladder; commits and pushes Data/ercot
     "ercot.yml": {"sha256": "a8e64d775ae9016020be8d886404ebd9b9b0ff6a0d4cd1729d619201d7f92672", "writes": "ercot"},
     # WRITER: JP's ladder; commits and pushes Data/jp
@@ -989,6 +989,35 @@ def test_every_step_with_a_pipe_runs_with_pipefail():
                                        "        run: a || true\n")
     assert _pipes_without_pipefail("jobs:\n  t:\n    steps:\n      - name: group\n"
                                    "        run: a | { tee log || true; }\n") == ["group"]
+
+
+# `pull_request_target` runs MAIN's workflow in main's context (GITHUB_REF is
+# main) for a pull request's event, so a main-only environment would let such a
+# job read its secrets (register D-35 (8), E6: the writers' deploy key lives in
+# the main-only `writers` environment). No workflow may use it, in any form: a
+# key, a list item, a quoted name. Comments are not read.
+PR_TARGET = re.compile(r"""(?<![\w-])["']?pull_request_target["']?(?![\w-])""")
+
+
+def _pull_request_target_lines(text: str) -> list[str]:
+    return [l.strip() for l in text.splitlines()
+            if not l.lstrip().startswith("#") and PR_TARGET.search(l.split(" #", 1)[0])]
+
+
+def test_no_workflow_uses_pull_request_target():
+    _private_workflows()
+    files = sorted(WORKFLOWS.glob("*.y*ml"))
+    assert files, "no workflow files were found"
+    bad = {p.name: got for p in files if (got := _pull_request_target_lines(p.read_text()))}
+    assert not bad, f"pull_request_target is refused in every workflow (D-35 (8), E6): {bad}"
+    # the guard bites on each way of writing the trigger, and not on a comment
+    for shape in ("on:\n  pull_request_target:\n", "on: [push, pull_request_target]\n",
+                  "on: pull_request_target\n", "on:\n  - 'pull_request_target'\n",
+                  'on: ["pull_request_target"]\n', "on:\n  pull_request_target: {types: [opened]}\n"):
+        assert _pull_request_target_lines(shape), shape
+    for harmless in ("# pull_request_target is refused here\n", "on:\n  pull_request:  # not pull_request_target\n",
+                     "on:\n  pull_request:\n"):
+        assert not _pull_request_target_lines(harmless), harmless
 
 
 def test_every_workflow_file_is_exactly_as_pinned():

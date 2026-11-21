@@ -23,9 +23,9 @@ prices are appended to a ledger that is never edited.
 
 Each market lives under `Data/<slug>/` and has its own page (`<slug>.html`):
 
-| Market | Zone | Currency | Source (licence) |
+| Market | Zone | Currency | Source and terms |
 |--------|------|----------|------------------|
-| Spain (ES) | Spain | EUR | apidatos.ree.es — public |
+| Spain (ES) | Spain | EUR | apidatos.ree.es — no licence verified; see [DATA-SOURCES.md](DATA-SOURCES.md) |
 | Germany (DE) | DE-LU | EUR | SMARD.de — CC BY 4.0 |
 | Great Britain (GB) | GB | GBP | Elexon BMRS Insights — open data |
 | ERCOT | HB_NORTH (Texas) | USD | ERCOT MIS NP4-190 — public/redistributable |
@@ -60,9 +60,11 @@ exchange only, not grid charges, taxes, or aggregator margin. Relative metrics
 P&L does not enforce dispatch order. On some days a strategy's sell hours come
 before its buy hours, which a battery that starts the day empty cannot run, and
 comparisons between strategies are NOT robust to that — see VERIFY.md section 4
-for the measured effect. Prices come from each market's public source
-above; Spain is cross-checked weekly against the independent token-based ESIOS
-route.
+for the measured effect. Prices come from each market's source above. Spain's
+are also cross-checked weekly, in the private repository, against REE's
+token-based ESIOS API. A checkout of this repository's current tree does not
+include `Data/esios_prices.json`, which the cross-check needs; earlier copies
+remain in its git history (see [DATA-SOURCES.md](DATA-SOURCES.md)).
 
 Run the tests: `uv sync && uv run pytest`. Tests that need files kept in the
 private repository skip and name the file. The ledger itself re-derives with

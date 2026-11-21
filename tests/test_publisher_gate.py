@@ -245,6 +245,9 @@ EPOCH = str(int(datetime(2026, 11, 16, 10, 1, tzinfo=timezone.utc).timestamp()))
 
 
 def _build(into: Path, epoch: str) -> None:
+    # The builder runs the publication allowlist's check (register T-43), which
+    # only the private repository has: on a public copy this skips by name.
+    private_file("team/publication_allowlist.py")
     env = {**os.environ, "TALEA_RENDER_EPOCH": epoch}
     r = subprocess.run(["bash", str(ROOT / "scripts" / "mirror_tree.sh"), str(into)], cwd=ROOT,
                        capture_output=True, text=True, timeout=600, env=env)

@@ -116,13 +116,31 @@ fi
 cd "$REPO" || exit 2
 export PATH="$HOME/.local/bin:$PATH"
 
-# The public-market set is REGISTRY-DERIVED (the single source of truth) — a new
-# public market is published automatically; a private one is impossible to leak
-# (it is never on the include list AND the terminal --exclude='*' drops it). If the
-# lookup fails, build NOTHING rather than wipe the mirror (fail-safe).
+# The public-market set is REGISTRY-DERIVED (the single source of truth), and
+# since register T-43 it must also equal the reserved publication allowlist
+# (below): a market made public in the registry is published only once the list
+# names it, which needs the operator's words. A private one is never on the
+# include list AND the terminal --exclude='*' drops it. If the lookup fails,
+# build NOTHING rather than wipe the mirror (fail-safe).
 SLUGS="$(uv run --no-dev python -m talea markets --public 2>/dev/null)"
 if [ -z "$SLUGS" ]; then
   echo "[mirror] could not resolve public markets" >&2; exit 3
+fi
+# THE PUBLICATION ALLOWLIST (register T-43). The public set, and where each
+# public market's prices come from, must be exactly what the reserved list
+# team/publication_allowlist.json allows; the slugs just resolved are judged
+# too. Run as the publisher runs the private-content check (the same `uv run
+# --no-project python -I -S`, under `timeout`). FAIL-CLOSED: anything but a
+# pass (a finding, exit 1; a check that cannot run, exit 2; no finish, 124 or
+# 137; uv or timeout missing, 127) builds NOTHING and exits 3, so the publisher
+# publishes nothing, leaves the mirror as it was and emails. Not the gate: it
+# does not follow the gate's observe mode.
+ALLOW_OUT="$(timeout -k 30 120 uv run --no-project python -I -S team/publication_allowlist.py \
+    --repo . --public "$SLUGS" 2>&1)"
+ALLOWED=$?
+[ -z "$ALLOW_OUT" ] || printf '%s\n' "$ALLOW_OUT" >&2
+if [ "$ALLOWED" -ne 0 ]; then
+  echo "[mirror] the publication allowlist did not pass (exit $ALLOWED): nothing is built" >&2; exit 3
 fi
 mkdir -p "$MIRROR" || exit 2
 
@@ -136,12 +154,14 @@ mkdir -p "$MIRROR/docs"
 # leaking now requires a market being flagged public in the registry, not a
 # forgotten exclude. (Incident 2026-08-28: FR leaked through a deny-LIST gap; this
 # flips the posture to fail-safe.) --delete-excluded purges anything now disallowed.
+# The deep history, Data/esios_prices.json, is NOT published (register T-36,
+# D-26 ruled 2026-11-20 "go"): no licence for its redistribution is verified,
+# and REE is asked in writing. Data/es/prices.json stays published.
 INCLUDES=()
 for s in $SLUGS; do INCLUDES+=(--include="/$s/***"); done
 rsync -a --delete --delete-excluded \
   --exclude='__pycache__' --exclude='.tick.lock' \
   "${INCLUDES[@]}" \
-  --include='/esios_prices.json' \
   --include='/calibration/***' \
   --include='/README-MOVED.md' \
   --exclude='*' \

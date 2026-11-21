@@ -616,14 +616,15 @@ def _named_documents(tree: str) -> list[str]:
     assert not unread, f"scripts/mirror_tree.sh names .md files in lines this test does not read: {unread}"
     names = top.group(1).split()
     names += ["docs/" + n for n in loop.group(1).replace("\\", " ").split()]
-    return ["README-public.md", "Data/README-MOVED.md", "Data/esios_prices.json"] + names
+    return ["README-public.md", "Data/README-MOVED.md"] + names
 
 
 def _mirrored_documents() -> list[tuple[str, Path]]:
     """The files the mirror gets, as far as this repository can tell without
     building it: the ones scripts/mirror_tree.sh names, and every file inside
     the trees it copies whole (src/, scripts/, tests/, Data/calibration/ and each
-    public market's Data/<slug>/), plus Data/esios_prices.json. The guard above
+    public market's Data/<slug>/). (Not Data/esios_prices.json: not published
+    since register T-36.) The guard above
     covers named .md files only; CI's scan of the built tree is the guarantee."""
     from talea.markets import public_markets
     names = _named_documents((ROOT / "scripts" / "mirror_tree.sh").read_text())
@@ -827,8 +828,7 @@ cp README-public.md "$MIRROR/README.md"
 
 
 def test_named_documents_are_read_from_the_copy_commands():
-    assert _named_documents(_TREE_OK) == ["README-public.md", "Data/README-MOVED.md",
-                                          "Data/esios_prices.json", "VERIFY.md",
+    assert _named_documents(_TREE_OK) == ["README-public.md", "Data/README-MOVED.md", "VERIFY.md",
                                           "GOVERNANCE.md", "pyproject.toml", "docs/a.md", "docs/b.md"]
 
 

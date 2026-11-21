@@ -51,6 +51,8 @@ talea/
 
 Each market's audit trail lives at `Data/<slug>/` (receipts, ledger, prices, OTS
 proofs) — ES included, none privileged. `Data/` root holds only shared/project
-artifacts (`esios_prices.json` deep history, `calibration/`). See `docs/ARCHITECTURE.md`
-for the full system (writers, mirror, governance) and `CLAUDE.md` for the operating
+artifacts (`calibration/`, and the `esios_prices.json` deep history, which the mirror's
+current tree does not carry: earlier copies remain in the mirror's git history, see
+`DATA-SOURCES.md`). See
+`docs/ARCHITECTURE.md` for the full system (writers, mirror, governance) and `CLAUDE.md` for the operating
 rules.

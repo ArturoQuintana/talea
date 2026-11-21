@@ -5,8 +5,9 @@ sourced from **Red Eléctrica de España (REE)** via the public `apidatos.ree.es
 API (cross-checked against the token-based ESIOS route, `api.esios.ree.es`).
 
 - Source: https://www.ree.es/ · https://apidatos.ree.es/
-- Terms: REE public / open data — see REE's data terms for the authoritative
-  conditions.
+- Terms: no licence for redistribution is verified. REData's API page states
+  no licence; its own words are "use them for your own purposes". Talea is
+  putting the question to REE in writing (see `DATA-SOURCES.md`).
 - Required attribution: **Red Eléctrica de España (REE)**.
 
 Ledger figures here are **derived** metrics (settlement of a simulated

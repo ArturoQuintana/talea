@@ -61,7 +61,7 @@ gate, idempotency, and durability (fsync, atomic `os.replace`, fcntl write lock)
 
 ## 6. Infrastructure & DevOps
 Hetzner VPS + systemd timers, GitHub Actions (geo-egress routing for ERCOT/JP),
-GitHub Pages, deploy keys, dead-man switches, SMTP + ntfy alerting, secrets under
+GitHub Pages, deploy keys, dead-man switches, SMTP email alerting (the ntfy push was retired 2026-11-11), secrets under
 a permanent no-sudo constraint, and disaster-recovery runbooks.
 - Where: `scripts/server_tick.sh`, `scripts/publish_mirror.sh`,
   `.github/workflows/ercot.yml` + `jp.yml`, `mirror/verify.yml`.
@@ -72,11 +72,14 @@ quarter-hourly → hourly aggregation, input-validation rails (a bad feed never
 touches the dataset), weekly cross-route reconciliation, and dataset provenance.
 - Where: `src/talea/markets/<slug>/fetch.py` + `markets/_entsoe.py`;
   `tools/esios-fetcher/`; `scripts/crosscheck_routes.py`;
-  `Data/<slug>/prices.json`; `Data/esios_prices.json` (frozen deep history).
+  `Data/<slug>/prices.json`; `Data/esios_prices.json` (deep history, refreshed weekly;
+  kept in the private repository; not in the mirror's current tree; earlier copies
+  remain in its git history).
 
 ## 8. Data licensing, IP & legal
-Per-source redistribution terms (REE public, SMARD CC BY 4.0, Elexon open, ERCOT
-NP4-190 public, JEPX attribution, ENTSO-E **non**-redistributable), attribution,
+Per-source redistribution terms (REE: no licence verified, see DATA-SOURCES.md; SMARD
+CC BY 4.0, Elexon open, ERCOT NP4-190 public, JEPX attribution, ENTSO-E
+**non**-redistributable), attribution,
 deny-by-default publishing, code licensing (MIT), and naming/trademark diligence.
 - Where: `DATA-SOURCES.md`, `Data/<slug>/LICENSE.md`, `LICENSE` (code),
   the allowlist in `scripts/mirror_tree.sh` (what `publish_mirror.sh` publishes).

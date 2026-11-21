@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- SYNTHETIC FIXTURE. Every price in this file was made up for the tests; no
+     ENTSO-E price data is in it (it is published on the public mirror). -->
 <Publication_MarketDocument xmlns="urn:iec62325.351:tc57wg16:451-3:publicationdocument:7:3">
   <mRID>synthetic-fixture</mRID>
   <type>A44</type>
