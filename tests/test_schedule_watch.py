@@ -241,14 +241,14 @@ def test_threshold_is_the_longest_slot_interval_plus_sixteen_hours():
 def test_the_real_scheduled_workflows_are_read_with_the_approved_thresholds():
     """Every scheduled workflow on this repository's main is understood, and
     the thresholds are the ones approved: 40 h daily, 32 h ercot, 34 h
-    mirror-freshness, 33.6 h jp. A new scheduled workflow is watched with no
+    mirror-freshness, 33.6 h jp, 22 h main-push-provenance (every 6 h). A new scheduled workflow is watched with no
     list to update; a new cron shape fails here first."""
     private_file(".github/workflows/red-main.yml")
     got = {w.key: w for w in rma.scheduled_workflows(ROOT, "ArturoQuintana/talea")}
     assert all(w.error is None for w in got.values()), [w for w in got.values() if w.error]
     hours = {k: rma.threshold(w.slots).total_seconds() / 3600 for k, w in got.items()}
     assert hours == {"ercot.yml": 32, "jp.yml": pytest.approx(33.6), "liveness.yml": 40,
-                     "mirror-freshness.yml": 34, "receipt-push-times.yml": 40, "red-main.yml": 40,
+                     "main-push-provenance.yml": 22, "mirror-freshness.yml": 34, "receipt-push-times.yml": 40, "red-main.yml": 40,
                      "stamp-margin.yml": 40, "write-gap.yml": 40,
                      "verify.yml (on ArturoQuintana/talea)": 40}
     assert "ci.yml" not in got

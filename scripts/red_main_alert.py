@@ -37,7 +37,10 @@ reaching origin — the class the server cannot see from its own clone (incident
 stamp-margin` (T2, stamp-margin.yml): one issue per trigger check, so a
 chronic trigger never hides another kind (ruled 2026-11-20, C1). Each of the
 three trigger checks also emails the operator its own list when its run is red
-(C2); red-main's rules for them are those of every run target.
+(C2); red-main's rules for them are those of every run target. And
+`--target provenance` (main's push provenance, team/main_push_provenance.py,
+main-push-provenance.yml): a change to main that did not come through a
+pull-request merge or one of the three writers.
 
 A FAILURE A NEWER GREEN RUN HID (register T-38, 2026-11-16): the state is the
 newest decisive run, so a failed run F followed by a green run G before F's
@@ -227,6 +230,17 @@ STAMP_MARGIN = Target(
         trig="T2", what="TRIGGER T2: a receipt stamped 60 s or less before its market's deadline",
         health="CANNOT JUDGE: a receipt without a readable stamp or day, or a history the check could "
         "not read"))
+PROVENANCE = Target(
+    "main-push-provenance.yml", "A change reached main outside a merge or a writer",
+    "main push provenance", "on main", "The main push-provenance check", "provenance",
+    "Red can mean either; the run log is the authority. FINDINGS (exit 1): an entry of main's "
+    "activity record that is not a pull-request merge and not a writer's push within its own "
+    "paths (a session's or a person's direct push, a writer outside its markets, a merge "
+    "commit, a deletion, a force-push or a recreated main). Each stays red until a reviewed "
+    "pull request acknowledges it in team/main_push_provenance_ack.json. CANNOT JUDGE "
+    "(exit 2): the activity record or the clone could not be read completely, or the "
+    "acknowledgements file is malformed. A failed step before the check: the check did not "
+    "run. The next successful run closes this issue.")
 SCHEDULES = Target(
     "(every scheduled workflow)", "A scheduled workflow has stopped running",
     "scheduled workflows", "", "A scheduled workflow", "schedules",
@@ -235,7 +249,7 @@ SCHEDULES = Target(
     "unwatched. The issue lists each stopped workflow and why.")
 TARGETS = {"ci": CI, "mirror-verify": MIRROR_VERIFY, "liveness": LIVENESS, "freshness": FRESHNESS,
            "push-times": PUSH_TIMES, "schedules": SCHEDULES, "write-gap": WRITE_GAP,
-           "stamp-margin": STAMP_MARGIN}
+           "stamp-margin": STAMP_MARGIN, "provenance": PROVENANCE}
 
 TITLE = CI.title
 DRILL_TITLE = "[DRILL] CI is red on main — delivery test"

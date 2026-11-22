@@ -376,12 +376,14 @@ PINNED = {
     "jp.yml": {"sha256": "39504b2d360660afa947c50231ce6e120c96d0a2b2d21cd6364cc6216498a403", "writes": "jp"},
     # read-only: every registered market still reaches origin
     "liveness.yml": {"sha256": "a479901cc898052651cc5ff522a9fcb8c16bdd464cd131fdf05da7cf5cc109af", "writes": None},
+    # read-only: every change to main is a PR merge or a writer's push within its paths
+    "main-push-provenance.yml": {"sha256": "2cd8ab244aa78f61414d364071ba669a1f8de208eb4eb325922250394a0924c3", "writes": None},
     # read-only: the public mirror is still being published after the server's windows
     "mirror-freshness.yml": {"sha256": "c0498891fd7852ea403627594f6c0b435243bc5eeae66025588e33ed3d118a24", "writes": None},
     # read-only: when each receipt reached GitHub, against its deadline (register T-35)
     "receipt-push-times.yml": {"sha256": "163041dfab1ed9da37ed528941072195074069a2dd9d04856f969ee41de0ae9e", "writes": None},
     # read-only on the repository: the red-main alert (issues and email)
-    "red-main.yml": {"sha256": "0d7cf3eddc7b3289c2a03989e109c910e5aa9a20f693c795d18dd81db118cd1d", "writes": None},
+    "red-main.yml": {"sha256": "133c729af647dd1192015cba54696fed83b53bf90f95bc84eba5d956b3826422", "writes": None},
     # read-only: D-36's trigger T2, a receipt stamped within 60 s of its deadline (register T-41)
     "stamp-margin.yml": {"sha256": "3d404f38929485c1f74cdb60755698ee91ba7b7f1a0b50154c4c7b104e1d56d8", "writes": None},
     # read-only: D-36's trigger T1, a write gap of 100 ms or more (register T-41)

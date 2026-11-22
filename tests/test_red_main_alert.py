@@ -375,8 +375,9 @@ def test_mirror_runs_are_read_without_the_token_when_github_refuses_it():
 def test_red_main_workflow_is_wired_and_read_only():
     text = private_file(".github/workflows/red-main.yml").read_text()
     assert re.search(r"workflow_run:\s*\n\s*workflows: \[ci, origin-liveness, mirror-freshness, receipt-push-times, "
-                     r"write-gap, stamp-margin\]", text), \
-        "must run after every CI, origin-liveness, mirror-freshness, receipt-push-times, write-gap and stamp-margin run"
+                     r"write-gap, stamp-margin, main-push-provenance\]", text), \
+        ("must run after every CI, origin-liveness, mirror-freshness, receipt-push-times, write-gap, "
+         "stamp-margin and main-push-provenance run")
     assert "branches: [main]" in text
     assert re.search(r'- cron:\s*"\d+ \d+ \* \* \*"', text), "must repeat daily while red"
     assert "workflow_dispatch" in text and "--drill" in text, "must be drillable on demand"
@@ -463,7 +464,7 @@ def test_a_red_freshness_run_opens_its_own_issue_and_says_what_red_means():
     assert _go(gh, "workflow_run", target=rma.FRESHNESS) == 0
     assert gh.log == [("create", rma.FRESHNESS.title, "owner")]
     assert gh.read == ("mirror-freshness.yml", None)
-    assert len({t.title for t in rma.TARGETS.values()}) == len(rma.TARGETS) == 8
+    assert len({t.title for t in rma.TARGETS.values()}) == len(rma.TARGETS) == 9
     assert "mirror freshness RED on the mirror" in FakeSMTP.sent[-1]["Subject"]
     still = rma.build_email("email_still_red", {"days": 1, "failed_runs": 3},
                             sender="a@example.test", to="b@example.test", target=rma.FRESHNESS)
@@ -552,6 +553,53 @@ def test_red_main_workflow_also_reports_the_freshness_run():
         assert f"{name}: ${{{{ secrets.{name} }}}}" in step
 
 
+
+
+def test_red_main_workflow_also_reports_main_push_provenance():
+    """Both halves of the wiring, as for liveness: triggered by the check's runs
+    (by its `name:`), and a step that reads them."""
+    name = re.search(r"^name:\s*(\S+)",
+                     private_file(".github/workflows/main-push-provenance.yml").read_text(), re.M).group(1)
+    text = private_file(".github/workflows/red-main.yml").read_text()
+    listed = re.search(r"workflow_run:\s*\n\s*workflows: \[([^\]]*)\]", text).group(1)
+    assert name in [w.strip() for w in listed.split(",")]
+    # The step alone: from its own line to the next line that starts a step of
+    # any kind (a "-" at the step's indentation, named or not), or to the end of
+    # the steps list (a line indented less than the step).
+    lines = text.splitlines()
+    start = next(i for i, ln in enumerate(lines)
+                 if re.fullmatch(r"\s*- name: Report main's push provenance \(issue \+ email\)", ln))
+    indent = len(lines[start]) - len(lines[start].lstrip())
+    end = start + 1
+    while end < len(lines):
+        ln = lines[end]
+        body = ln.lstrip()
+        if body and (len(ln) - len(body) < indent
+                     or (len(ln) - len(body) == indent and body.startswith("-"))):
+            break
+        end += 1
+    step = "\n".join(lines[start:end])
+    # Each key at EXACTLY its column, nothing before it but those spaces: the
+    # step's keys at the column of "name:" (the step's indentation + 2), each
+    # secret at the env: key's column + 2. A comment, or a value line inside a
+    # deeper block (a folded string), never stands in for the key.
+    key = " " * (indent + 2)
+    var = key + "  "
+    assert re.search(rf"^{key}if: \$\{{\{{ always\(\) && !inputs\.drill \}}\}}[ ]*$", step, re.M), step
+    assert re.search(rf"^{key}run: uv run --no-project python scripts/red_main_alert\.py "
+                     rf"--target provenance[ ]*$", step, re.M), step
+    assert re.search(rf"^{key}env:[ ]*$", step, re.M), step
+    for secret in ("ALERT_SMTP_USER", "ALERT_SMTP_PASSWORD", "ALERT_EMAIL_TO"):
+        assert re.search(rf"^{var}{secret}: \$\{{\{{ secrets\.{secret} \}}\}}[ ]*$", step, re.M), secret
+    assert rma.TARGETS["provenance"].workflow == "main-push-provenance.yml"
+
+
+def test_a_red_provenance_run_opens_its_own_issue():
+    gh = FakeGitHub([_run("failure", "2026-11-22T12:47:00Z")])
+    assert _go(gh, "workflow_run", target=rma.PROVENANCE) == 0
+    assert gh.log == [("create", rma.PROVENANCE.title, "owner")]
+    assert gh.read == ("main-push-provenance.yml", None)
+    assert "main push provenance RED on main" in FakeSMTP.sent[-1]["Subject"]
 
 # --- a failure a newer green run hid (register T-38, 2026-11-16) ---
 # red-main read the NEWEST decisive run, so a failed run F followed by a green
