@@ -377,7 +377,7 @@ PINNED = {
     # read-only: every registered market still reaches origin
     "liveness.yml": {"sha256": "a479901cc898052651cc5ff522a9fcb8c16bdd464cd131fdf05da7cf5cc109af", "writes": None},
     # read-only: every change to main is a PR merge or a writer's push within its paths
-    "main-push-provenance.yml": {"sha256": "2cd8ab244aa78f61414d364071ba669a1f8de208eb4eb325922250394a0924c3", "writes": None},
+    "main-push-provenance.yml": {"sha256": "33b1749e00c4ef881a6af9551a727d7f6bd71f5bd845bea905cbb714a5a30ed4", "writes": None},
     # read-only: the public mirror is still being published after the server's windows
     "mirror-freshness.yml": {"sha256": "c0498891fd7852ea403627594f6c0b435243bc5eeae66025588e33ed3d118a24", "writes": None},
     # read-only: when each receipt reached GitHub, against its deadline (register T-35)

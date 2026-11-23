@@ -594,6 +594,30 @@ def test_red_main_workflow_also_reports_main_push_provenance():
     assert rma.TARGETS["provenance"].workflow == "main-push-provenance.yml"
 
 
+
+def test_main_push_provenance_runs_after_every_ci_run_on_main_and_on_its_schedule():
+    """The check runs after every completed ci run on main (each push that starts
+    workflows is judged within minutes), keeps its four daily slots as the
+    backstop (a GITHUB_TOKEN push starts no ci), and stays read-only. Keys are
+    read at their exact columns, so a comment or a value never stands in."""
+    wf = private_file(".github/workflows/main-push-provenance.yml").read_text()
+    ci_name = re.search(r"^name:\s*(\S+)\s*$", private_file(".github/workflows/ci.yml").read_text(),
+                        re.M).group(1)
+    on = wf.split("\non:\n", 1)[1].split("\n\n", 1)[0]
+    block = re.search(r"^  workflow_run:\n((?:    \S.*\n|\s*#.*\n)+)", on + "\n", re.M)
+    assert block, on
+    body = block.group(1)
+    assert re.search(rf"^    workflows: \[{re.escape(ci_name)}\][ ]*$", body, re.M), body
+    assert re.search(r"^    types: \[completed\][ ]*$", body, re.M), body
+    assert re.search(r"^    branches: \[main\][ ]*$", body, re.M), body
+    assert re.search(r"^  schedule:[ ]*$", on, re.M) and re.search(r"^  workflow_dispatch:[ ]*$", on, re.M)
+    assert re.findall(r'^    - cron: "(\d+ \d+) \* \* \*"[ ]*$', on, re.M) == \
+        ["47 2", "47 8", "47 14", "47 20"]
+    assert not re.search(r"^  (pull_request|pull_request_target|push|issue_comment):", on, re.M)
+    assert re.search(r"^permissions:\n  contents: read\n\n", wf, re.M)
+    assert re.search(r"^concurrency:\n  group: main-push-provenance\n  cancel-in-progress: false\n",
+                     wf, re.M)
+
 def test_a_red_provenance_run_opens_its_own_issue():
     gh = FakeGitHub([_run("failure", "2026-11-22T12:47:00Z")])
     assert _go(gh, "workflow_run", target=rma.PROVENANCE) == 0
