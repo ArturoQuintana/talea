@@ -39,6 +39,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from talea.markets import (   # noqa: E402
     MARKETS as _REGISTRY, public_markets as _public_markets)
 from talea.liveness import market_liveness as _market_liveness  # noqa: E402
+from talea.loop import expected_hours  # noqa: E402
 
 
 def _presentation_config() -> dict[str, dict]:
@@ -128,6 +129,61 @@ def _stale_banner(cfg: dict, now: datetime) -> str:
             f'{detail}. Updates have stopped reaching this page; open receipts '
             'shown as pending are not settling here. Treat every figure as of '
             'that date until this notice clears.</div>')
+
+
+def _price_holes(data: Path, tz: ZoneInfo) -> list[str]:
+    """Days the dataset of record holds FEWER hours than a fully published day
+    has, by the ledger's own rule (loop.expected_hours: 23 keys on the
+    market-local spring-forward day, 24 on every other day, the autumn day
+    included), from the first receipt's target up to, but not including, the
+    newest stored day: the newest day may still be filling in.
+
+    Independent-audit finding (2026-11-23, DE): prices.json had no hour for
+    2026-11-20 or 2026-11-21 while 11-22 and 11-23 were stored. verify_ledger
+    WARNed, but de.html showed the receipts for those days as ordinary
+    "Pending". The page states the coverage fact itself, and nothing more: it
+    makes no claim about why the hours are missing, and it does not attribute
+    missed commits to the gap (a missed day is told by the receipts alone)."""
+    pp, rp = data / "prices.json", data / "receipts.jsonl"
+    if not pp.exists() or not rp.exists():
+        return []
+    keys: dict[str, set[str]] = {}
+    for r in json.loads(pp.read_text()):
+        keys.setdefault(r["ts"][:10], set()).add(r["ts"])
+    targets = [r["target"] for r in jsonl(rp)]
+    if not keys or not targets:
+        return []
+    newest = date.fromisoformat(max(keys))
+    d, holes = date.fromisoformat(min(targets)), []
+    while d < newest:
+        if len(keys.get(d.isoformat(), ())) < expected_hours(d, tz):
+            holes.append(d.isoformat())
+        d += timedelta(days=1)
+    return holes
+
+
+def _price_gap_banner(cfg: dict) -> str:
+    """A coverage disclosure: the days this market's prices.json holds fewer
+    hours than expected for, and how many receipts for those days stay
+    unsettled. Empty when there is none. Coverage only: no cause, no misses,
+    and no retry promise (loop.fetch_start re-requests only a day with NO
+    stored hour, so a partially covered day is flagged but never retried)."""
+    data = cfg["data"]
+    holes = _price_holes(data, cfg["tz"])
+    if not holes:
+        return ""
+    settled = {(e["target"], e["strategy"]) for e in jsonl(data / "ledger.jsonl")}
+    blocked = [r for r in jsonl(data / "receipts.jsonl")
+               if r["target"] in holes and (r["target"], r["strategy"]) not in settled]
+    days = ", ".join(f"<code>{h}</code>" for h in holes)
+    n = len(blocked)
+    those = "those days" if len(holes) > 1 else "that day"
+    unsettled = (f"; {n} receipt{'s' if n != 1 else ''} for {those} "
+                 f"stay{'s' if n == 1 else ''} unsettled until they are stored"
+                 if n else "")
+    return ('<div class="banner disclosure stale"><b>Price-data gap.</b> '
+            f'<code>Data/{data.name}/prices.json</code> holds fewer hours than '
+            f'expected for {days}{unsettled}.</div>')
 
 
 def jsonl(p: Path) -> list[dict]:
@@ -223,16 +279,20 @@ BASE_TOKENS = """<style>
 </style>"""
 
 
-def _open_cards(receipts: list[dict], settled_keys: set) -> list[str]:
-    """The 'committed before truth' cards — receipts with no settlement yet."""
+def _open_cards(receipts: list[dict], settled_keys: set,
+                holes: list[str] = ()) -> list[str]:
+    """The 'committed before truth' cards — receipts with no settlement yet. A
+    receipt whose target is a hole in the price data is labelled as such, not
+    as an ordinary "Pending" (audit finding 2026-11-23, DE)."""
     open_receipts = [r for r in receipts
                      if (r["target"], r["strategy"]) not in settled_keys]
     open_html = []
     for r in sorted(open_receipts, key=lambda r: (r["target"], r["strategy"])):
         open_html.append(
             f'<div class="open-card" style="margin-bottom:10px">'
-            f'<span class="pending">Pending</span>'
-            f'<span class="oc"><b>{r["target"]}</b> · {NAMES.get(r["strategy"], r["strategy"])}'
+            + ('<span class="pending">Unsettled · price-data gap</span>'
+               if r["target"] in holes else '<span class="pending">Pending</span>')
+            + f'<span class="oc"><b>{r["target"]}</b> · {NAMES.get(r["strategy"], r["strategy"])}'
             f'{" · primary" if r["strategy"] == PRIMARY else " · shadow"}</span>'
             f'<span class="oc">buy <b class="m">{"·".join(f"{h:02d}" for h in r["buy_hours"])}h</b>'
             f' · sell <b class="m">{"·".join(f"{h:02d}" for h in r["sell_hours"])}h</b></span>'
@@ -252,7 +312,7 @@ def _page_head(slug: str, cfg: dict, now: datetime) -> str:
       before price publication (leak-guarded, OpenTimestamps-stamped —
       Bitcoin&#8209;confirmed within days) · as of <code>{asof}</code></p>
   </header>
-  {_stale_banner(cfg, now)}{_disclosure(cfg)}"""
+  {_stale_banner(cfg, now)}{_price_gap_banner(cfg)}{_disclosure(cfg)}"""
 
 
 def _light_footer(cfg: dict) -> str:
@@ -273,7 +333,7 @@ def _awaiting(slug: str, cfg: dict, receipts: list[dict], now: datetime,
     """Public page for a live market with NO settled day yet (for ANY strategy):
     the receipts are already committed-before-truth; only the settlement/P&L is
     pending. This is the honest live state of a just-launched market."""
-    open_html = _open_cards(receipts, set())
+    open_html = _open_cards(receipts, set(), _price_holes(cfg["data"], cfg["tz"]))
     if not open_html:
         open_html = ['<div class="open-card"><span class="pending">None yet'
                      '</span><span class="oc">First receipt commits at the next '
@@ -368,7 +428,7 @@ def _shadow_only(slug: str, cfg: dict, receipts: list[dict], ledger: list[dict],
                      "target days) — only shadow strategies have; see the "
                      "disclosure above and VERIFY.md.")
     head, rows, pair_notes, strategies = _h2h(ledger, [], cur)
-    open_html = _open_cards(receipts, settled_keys)
+    open_html = _open_cards(receipts, settled_keys, _price_holes(cfg["data"], cfg["tz"]))
     if not open_html:
         open_html = ['<div class="open-card"><span class="pending">None open'
                      '</span><span class="oc">Next commit at the next '
@@ -469,7 +529,7 @@ def build(slug: str = "es", now: datetime | None = None) -> str:
             'left">missed — no receipt committed before the window closed; '
             "never backfilled (leak guard)</td><td>—</td></tr>")
 
-    open_html = _open_cards(receipts, settled_keys)
+    open_html = _open_cards(receipts, settled_keys, _price_holes(cfg["data"], cfg["tz"]))
     if not open_html:
         open_html = ['<div class="open-card"><span class="pending">None open'
                      '</span><span class="oc">Next commit at the next 11:00 '
@@ -508,7 +568,8 @@ def build(slug: str = "es", now: datetime | None = None) -> str:
         "cur": cur, "curcode": curcode,
         "source": cfg.get("source", "apidatos.ree.es"),
         "publication": _publication(cfg),
-        "disclosure": _stale_banner(cfg, now) + _disclosure(cfg),
+        "disclosure": (_stale_banner(cfg, now) + _price_gap_banner(cfg)
+                       + _disclosure(cfg)),
         "asof": now.strftime(f"%Y-%m-%d %H:%M {cfg['tzlabel']}"),
         "total": signed(total), "total_cls": sign_cls(total),
         "oracle_total": fmt(oracle_total),

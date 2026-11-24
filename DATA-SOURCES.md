@@ -7,7 +7,10 @@ of those terms, and this file indexes them. Where no licence is verified, this
 file says so: for Spain (ES), see "Spain (ES)" below.
 
 Markets whose price data is known not to be freely redistributable (the
-ENTSO-E-sourced IT/PT/FR) are never included in this public mirror.
+ENTSO-E-sourced IT/PT/FR) are not published here. Two slips are logged in
+`docs/incidents.md`: French price files were on this mirror's main for 72
+minutes on 2026-08-28, and a Portuguese API response served as a test
+fixture until 2026-11-11.
 
 | Market | Directory | Source | Licence / terms | Required attribution |
 |--------|-----------|--------|-----------------|----------------------|

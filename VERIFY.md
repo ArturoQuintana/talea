@@ -161,7 +161,14 @@ begins 2026-08-08; the first week (2026-07-30 →
 timestamps cannot be backdated, which is the entire point of the mechanism.
 Treat the record as three tiers of strength: OTS-anchored (2026-08-08+),
 git-corroborated (private repo, 2026-07-30+), and the mirror's own history
-(2026-08-10+). On 2026-08-21 an independent audit found that same-day
+(2026-08-10+). That history was rewritten once: on 2026-08-28, after an
+ordinary commit had deleted price files of a market that may not be
+redistributed, main was force-pushed to rewrite three commits
+(`docs/incidents.md`, that date). No audit file of a published market changed
+in it — the append-only check in section 2 holds on the history as it stands —
+but a reader should know the one time it happened. Since 2026-11-11 a ruleset
+on this repository blocks force-push and deletion of main, with no bypass. On
+2026-08-21 an independent audit found that same-day
 re-ticks had been silently rewriting stamped manifests, invalidating 12
 proofs; the stamped originals were restored from git history, and the tick
 was fixed so stamped manifests are immutable (changed state gets a new

@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 
 import pytest
+from talea import loop
 
 _SPEC = importlib.util.spec_from_file_location(
     "render_dashboard",
@@ -261,11 +262,15 @@ def test_footer_publication_time_is_per_market(monkeypatch, tmp_path):
     ERCOT DAM ~13:30 CT) — the template had one hardcoded clock for every
     market. The footer must take the label from the market's own registry
     entry, on the full page AND the awaiting/shadow pages."""
+    # Read the FOOTER only, rendered at a pinned instant: the page's "data as of"
+    # stamp is the render clock, so a whole-page check failed whenever the test
+    # ran during minute 13:15 of a market's local time (incident 2026-11-23,
+    # red main 3c12a1b: "2026-11-23 13:15 London" in gb's header).
     for slug in ("es", "de", "ercot", "gb"):
         _seed(monkeypatch, tmp_path, slug, ["2026-08-12", "2026-08-13"],
               [_settle("2026-08-13", P, 100.0, 120.0, 0.83)],
               [_receipt("2026-08-13", "2026-08-12", P)])
-    es, de, ercot, gb = (rd.build(s) for s in ("es", "de", "ercot", "gb"))
+    es, de, ercot, gb = (_footer(rd.build(s, now=PINNED)) for s in ("es", "de", "ercot", "gb"))
     assert "13:15 CET" in es
     assert "13:15" not in de and "12:40-13:00 CET" in de
     assert "13:15" not in ercot and "13:30 CT" in ercot
@@ -273,9 +278,40 @@ def test_footer_publication_time_is_per_market(monkeypatch, tmp_path):
     # awaiting template (empty ledger) — same rule
     _seed(monkeypatch, tmp_path / "aw", "de", ["2026-08-12"], [],
           [_receipt("2026-08-13", "2026-08-12", P)])
-    aw = rd.build("de")
-    assert "awaiting first settled day" in aw and "13:15" not in aw \
-        and "12:40-13:00 CET" in aw
+    aw = rd.build("de", now=PINNED)
+    assert "awaiting first settled day" in aw
+    assert "13:15" not in _footer(aw) and "12:40-13:00 CET" in _footer(aw)
+
+
+@pytest.mark.parametrize("slug,tz", [("gb", "Europe/London"), ("de", "Europe/Berlin"),
+                                     ("ercot", "America/Chicago")])
+def test_footer_check_does_not_depend_on_the_render_clock(monkeypatch, tmp_path, slug, tz):
+    """Regression (2026-11-23): rendered at 13:15 in the market's own time, the
+    page holds "13:15" in its "data as of" stamp; the footer, which carries the
+    publication time, does not. The old whole-page check fails here."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    _seed(monkeypatch, tmp_path, slug, ["2026-08-12", "2026-08-13"],
+          [_settle("2026-08-13", P, 100.0, 120.0, 0.83)],
+          [_receipt("2026-08-13", "2026-08-12", P)])
+    page = rd.build(slug, now=datetime(2026, 11, 23, 13, 15, tzinfo=ZoneInfo(tz)))
+    assert "2026-11-23 13:15" in page                    # the clock, in the header
+    assert "13:15" not in _footer(page)                  # never in the footer
+
+
+def _footer(page: str) -> str:
+    """The page's one <footer> element."""
+    parts = page.split("<footer>")
+    assert len(parts) == 2, "expected exactly one <footer>"
+    return parts[1].split("</footer>", 1)[0]
+
+
+def _pinned():
+    from datetime import datetime, timezone
+    return datetime(2026, 8, 14, 9, 0, tzinfo=timezone.utc)
+
+
+PINNED = _pinned()
 
 
 def test_gb_page_is_not_titled_day_ahead_on_any_template(monkeypatch, tmp_path):
@@ -524,3 +560,168 @@ def test_every_presented_market_carries_its_timezone():
     from zoneinfo import ZoneInfo
     for slug, cfg in rd.MARKETS.items():
         assert isinstance(cfg["tz"], ZoneInfo), slug
+
+
+def test_price_data_hole_is_disclosed_not_shown_as_ordinary_pending(
+        monkeypatch, tmp_path):
+    """Independent-audit finding (2026-11-23, DE): Data/de/prices.json had no
+    hour for 2026-11-20 or 11-21 while 11-22 and 11-23 were stored.
+    verify_ledger WARNed, but de.html listed the receipts for those days as
+    ordinary "Pending" with no note. The page states the coverage fact and
+    nothing more: no cause it cannot prove from the stored data, and no
+    attribution of missed days to the gap (their wording is unchanged)."""
+    days = ["2026-11-18", "2026-11-19", "2026-11-22", "2026-11-23"]  # 20, 21 skipped
+    ledger = [_settle("2026-11-19", P, 100.0, 120.0, 0.83),
+              _settle("2026-11-19", C, 90.0, 120.0, 0.75),
+              _settle("2026-11-23", C, 80.0, 120.0, 0.66)]
+    receipts = [_receipt("2026-11-19", "2026-11-18", P),
+                _receipt("2026-11-19", "2026-11-18", C),
+                _receipt("2026-11-20", "2026-11-19", P),   # gap day: unsettled
+                _receipt("2026-11-20", "2026-11-19", C),   # gap day: unsettled
+                _receipt("2026-11-21", "2026-11-20", C),   # gap day: unsettled
+                # no persistence for 11-21 / 11-22
+                _receipt("2026-11-22", "2026-11-21", C),
+                _receipt("2026-11-23", "2026-11-22", P),
+                _receipt("2026-11-23", "2026-11-22", C)]
+    d = _seed(monkeypatch, tmp_path, "de", days, ledger, receipts)
+    assert rd._price_holes(d, rd.MARKETS["de"]["tz"]) == ["2026-11-20", "2026-11-21"]
+    html = rd.build("de")
+    assert ("<b>Price-data gap.</b> <code>Data/de/prices.json</code> holds fewer "
+            "hours than expected for <code>2026-11-20</code>, <code>2026-11-21</code>; "
+            "3 receipts for those days stay unsettled until they are stored."
+            "</div>") in html
+    assert html.count("Unsettled · price-data gap") == 3
+    # coverage only: no causal claim, no attribution of the misses
+    for claim in ("no tick that asked", "received", "from a price-data gap",
+                  "basis day 2026", "missing from the price data",
+                  "counted as missed below", "not because a tick"):
+        assert claim not in html, claim
+    assert "2 missed" in html
+    assert html.count("missed — no receipt committed before the window closed") == 2
+
+
+def test_backfilled_hole_still_shows_the_receipt_it_cost_as_missed(
+        monkeypatch, tmp_path):
+    """DE's real case (2026-09): SMARD did not serve 2026-09-13 on the ticks
+    that asked, so no persistence receipt could commit for 09-14 (its basis
+    day); the 09-13 prices were stored later (commit 5a834a3, after 09-14's
+    commit window had closed). Once the prices are complete the gap banner
+    clears, but the receipt that was never committed is still a miss: the
+    page must keep showing 09-14 as missed, truthfully, without depending on
+    today's coverage."""
+    days = ["2026-09-11", "2026-09-12", "2026-09-13", "2026-09-14",
+            "2026-09-15", "2026-09-16"]                  # 09-13 backfilled
+    ledger = [_settle(t, s, 100.0, 120.0, 0.83)
+              for t in ("2026-09-12", "2026-09-13", "2026-09-15") for s in (P, C)]
+    ledger.append(_settle("2026-09-14", C, 90.0, 120.0, 0.75))
+    receipts = [_receipt(t, b, s)
+                for t, b in (("2026-09-12", "2026-09-11"), ("2026-09-13", "2026-09-12"),
+                             ("2026-09-15", "2026-09-14"), ("2026-09-16", "2026-09-15"))
+                for s in (P, C)]
+    receipts.append(_receipt("2026-09-14", "2026-09-13", C))  # persistence never did
+    d = _seed(monkeypatch, tmp_path, "de", days, ledger, receipts)
+    assert rd._price_holes(d, rd.MARKETS["de"]["tz"]) == []
+    html = rd.build("de")
+    assert "Price-data gap" not in html
+    assert "1 missed" in html
+    assert ('<tr><td class="k">2026-09-14</td><td colspan="6" style="text-align:'
+            'left">missed — no receipt committed before the window closed; '
+            "never backfilled (leak guard)</td>") in html
+
+
+def _with_keys(d, day, hours):
+    """Rewrite prices.json so `day` holds exactly the given local-hour keys."""
+    rows = [r for r in json.loads((d / "prices.json").read_text())
+            if r["ts"][:10] != day]
+    rows += [{"ts": f"{day}T{h:02d}", "price": 50.0 + h} for h in hours]
+    (d / "prices.json").write_text(json.dumps(sorted(rows, key=lambda r: r["ts"])))
+
+
+def _coverage_case(monkeypatch, tmp_path, day):
+    prev = (rd.date.fromisoformat(day) - rd.timedelta(days=1)).isoformat()
+    nxt = (rd.date.fromisoformat(day) + rd.timedelta(days=1)).isoformat()
+    receipts = [_receipt(prev, prev, P), _receipt(day, prev, P), _receipt(nxt, day, P)]
+    return _seed(monkeypatch, tmp_path, "de", [prev, day, nxt], [], receipts)
+
+
+@pytest.mark.parametrize("day, hours, hole", [
+    # spring-forward (Europe/Berlin 2026-03-29): 02:00 does not exist, 23 keys
+    ("2026-03-29", [h for h in range(24) if h != 2], False),
+    ("2026-03-29", [h for h in range(24) if h not in (2, 3)], True),
+    # fall-back (2026-10-25): 25 real hours, keyed by local clock hour = 24 keys
+    ("2026-10-25", list(range(24)), False),
+    ("2026-10-25", list(range(23)), True),
+    # an ordinary interior day short of hours is a hole, 23 keys included
+    ("2026-11-12", list(range(23)), True),
+    ("2026-11-12", list(range(22)), True),
+    ("2026-11-12", list(range(24)), False),
+])
+def test_price_hole_uses_the_ledgers_market_local_coverage_rule(
+        monkeypatch, tmp_path, day, hours, hole):
+    """Not a fixed 23-hour cutoff: the expected count is loop.expected_hours,
+    the same rule settlement uses (23 keys on spring-forward, 24 otherwise)."""
+    d = _coverage_case(monkeypatch, tmp_path, day)
+    _with_keys(d, day, hours)
+    tz = rd.MARKETS["de"]["tz"]
+    assert rd._price_holes(d, tz) == ([day] if hole else [])
+    assert rd.expected_hours is loop.expected_hours
+
+
+def test_newest_still_filling_day_is_never_a_hole(monkeypatch, tmp_path):
+    d = _coverage_case(monkeypatch, tmp_path, "2026-11-12")
+    _with_keys(d, "2026-11-13", range(5))               # newest day, partial
+    assert rd._price_holes(d, rd.MARKETS["de"]["tz"]) == []
+
+
+def test_partially_covered_day_gets_coverage_wording_and_no_retry_promise(
+        monkeypatch, tmp_path):
+    """Reader finding (2026-11-24): the note promised "the tick re-requests
+    them for 14 days", but loop.fetch_start re-requests only a day with NO
+    stored hour. A day holding 23 of its 24 hours is flagged and never retried
+    (the fetch starts at the newest day), so the note must not promise one."""
+    d = _coverage_case(monkeypatch, tmp_path, "2026-11-12")
+    _with_keys(d, "2026-11-12", range(23))
+    prices = {r["ts"]: r["price"] for r in json.loads((d / "prices.json").read_text())}
+    assert loop.fetch_start(prices, rd.date(2026, 11, 14)) == rd.date(2026, 11, 13)
+    html = rd.build("de")
+    assert ("<b>Price-data gap.</b> <code>Data/de/prices.json</code> holds fewer "
+            "hours than expected for <code>2026-11-12</code>; 1 receipt for that "
+            "day stays unsettled until they are stored.</div>") in html
+    for promise in ("re-request", "requests them", "asks again", "for 14 days",
+                    "two weeks", "retr"):
+        assert promise not in html.split("Price-data gap")[1].split("</div>")[0], promise
+
+
+@pytest.mark.parametrize("ledger", [[], [_settle("2026-08-31", C, 1.0, 2.0, 0.5)]],
+                         ids=["awaiting", "shadow-only"])
+def test_gap_banner_on_awaiting_and_shadow_only_pages_claims_no_tally(
+        monkeypatch, tmp_path, ledger):
+    """The awaiting and shadow-only templates have no miss tally: their
+    banner must not refer to one, and the gap receipt is still labelled."""
+    receipts = [_receipt("2026-08-31", "2026-08-30", C),
+                _receipt("2026-09-01", "2026-08-31", C)]
+    _seed(monkeypatch, tmp_path, "gb", ["2026-08-30", "2026-08-31", "2026-09-02"],
+          ledger, receipts)                              # 09-01 absent
+    html = rd.build("gb")
+    assert "holds fewer hours than expected for <code>2026-09-01</code>" in html
+    assert "1 receipt for that day stays unsettled until they are stored" in html
+    assert "Unsettled · price-data gap" in html
+    assert "below" not in html.split("Price-data gap")[1].split("</div>")[0]
+
+
+
+def test_no_price_gap_note_when_the_dataset_is_complete(monkeypatch, tmp_path):
+    """The newest stored day may still be filling in (GB's index does): it is
+    never a hole, and a late-tick miss keeps its own wording."""
+    days = ["2026-08-12", "2026-08-13", "2026-08-14", "2026-08-15"]
+    ledger = [_settle("2026-08-13", P, 100.0, 120.0, 0.83)]
+    receipts = [_receipt("2026-08-13", "2026-08-12", P),
+                _receipt("2026-08-15", "2026-08-14", P)]
+    d = _seed(monkeypatch, tmp_path, "de", days, ledger, receipts)
+    rows = json.loads((d / "prices.json").read_text())
+    (d / "prices.json").write_text(json.dumps(rows[:-5]))   # newest day partial
+    assert rd._price_holes(d, rd.MARKETS["de"]["tz"]) == []
+    html = rd.build("de")
+    assert "Price-data gap" not in html
+    assert "Unsettled · price-data gap" not in html
+    assert "missed — no receipt committed before the window closed" in html
